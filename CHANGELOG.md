@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-04-15
+
+### Added
+
+- Unit tests for every recognizer, helper, and ignorelist matching path.
+  Locks in every false-positive fix shipped in 0.5.11-0.5.15 (OID rejection,
+  IPv4-shape phones, NANP area validation, compact SSN context, CC float
+  context, numeric-TLD email rejection, `::endgroup` IPv6 sentinel, etc.).
+  48 tests covering regex accepts + rejects, Luhn / entropy / mod-97 /
+  base58check helpers, and ignorelist scope / pattern / wildcard matching.
+
 ## [0.5.15] - 2026-04-16
 
 ### Added

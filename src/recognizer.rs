@@ -1005,3 +1005,304 @@ impl Recognizer for PassportCandidateRecognizer {
         regex_emit(file, text, &self.re, self.entity_type(), 0.5)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(findings: Vec<Finding>) -> Vec<String> {
+        findings.into_iter().map(|f| f.text).collect()
+    }
+
+    // ---------- EmailRecognizer ----------
+
+    #[test]
+    fn email_accepts_common_shapes() {
+        let r = EmailRecognizer::new();
+        let t = texts(r.analyze("f", "write to user@example.com or user.name+tag@sub.domain.co"));
+        assert!(t.iter().any(|s| s == "user@example.com"));
+        assert!(t.iter().any(|s| s == "user.name+tag@sub.domain.co"));
+    }
+
+    #[test]
+    fn email_rejects_numeric_tld() {
+        // GitHub Actions pin: `name@1.8.1` - TLD `1` has no letter.
+        let r = EmailRecognizer::new();
+        assert!(r
+            .analyze("f", "uses: supercharge/redis-github-action@1.8.1")
+            .is_empty());
+    }
+
+    // ---------- CreditCardRecognizer ----------
+
+    #[test]
+    fn credit_card_accepts_compact_and_dashed() {
+        let r = CreditCardRecognizer::new();
+        assert_eq!(r.analyze("f", "card: 4532015112830366").len(), 1);
+        assert_eq!(r.analyze("f", "card: 4532-0151-1283-0366").len(), 1);
+    }
+
+    #[test]
+    fn credit_card_rejects_float_context() {
+        // `6.349667550340612` - digits following `.` happen to pass Luhn.
+        let r = CreditCardRecognizer::new();
+        assert!(r.analyze("f", "x = 6.349667550340612 * y").is_empty());
+    }
+
+    #[test]
+    fn credit_card_rejects_low_entropy() {
+        // Brand prefix + Luhn-valid, but only 2 unique digits.
+        let r = CreditCardRecognizer::new();
+        assert!(r.analyze("f", "card: 4111 1111 1111 1111").is_empty());
+    }
+
+    // ---------- PhoneRecognizer ----------
+
+    #[test]
+    fn phone_emits_us_for_formatted_number() {
+        let r = PhoneRecognizer::new();
+        let f = r.analyze("f", "Call (415) 555-2671 today");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].entity_type, "US_PHONE");
+    }
+
+    #[test]
+    fn phone_emits_intl_for_non_us_country_code() {
+        let r = PhoneRecognizer::new();
+        let f = r.analyze("f", "UK office: +44 20 7946 0958");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].entity_type, "INTL_PHONE");
+    }
+
+    #[test]
+    fn phone_rejects_ipv4_shape() {
+        // `3.214.229.114` would pass phonenumber as `(321) 422-9114`.
+        let r = PhoneRecognizer::new();
+        assert!(r.analyze("f", "server: 3.214.229.114 responded").is_empty());
+    }
+
+    #[test]
+    fn phone_rejects_plain_digits_without_context() {
+        let r = PhoneRecognizer::new();
+        assert!(r
+            .analyze("f", "getPatientByExternalId(\"1234567890\")")
+            .is_empty());
+    }
+
+    #[test]
+    fn phone_rejects_invalid_nanp_area() {
+        // `1234567890` area code 123 - first digit 1 invalid per NANP.
+        let r = PhoneRecognizer::new();
+        assert!(r.analyze("f", "phone: 1234567890").is_empty());
+    }
+
+    #[test]
+    fn phone_rejects_embedded_digit_run() {
+        // Digits inside a hex-ish identifier should not match.
+        let r = PhoneRecognizer::new();
+        assert!(r.analyze("f", "sig=abc432562433694def").is_empty());
+    }
+
+    // ---------- UsSsnRecognizer ----------
+
+    #[test]
+    fn ssn_accepts_dashed_form_without_context() {
+        let r = UsSsnRecognizer::new();
+        assert_eq!(r.analyze("f", "pt 123-45-6789 filed").len(), 1);
+    }
+
+    #[test]
+    fn ssn_accepts_compact_only_with_context() {
+        let r = UsSsnRecognizer::new();
+        assert_eq!(r.analyze("f", "ssn: 123456789").len(), 1);
+        assert!(r.analyze("f", "sample_id: 123456789").is_empty());
+    }
+
+    #[test]
+    fn ssn_rejects_reserved_area_numbers() {
+        let r = UsSsnRecognizer::new();
+        assert!(r
+            .analyze(
+                "f",
+                "ssn 000-12-3456 ssn 666-12-3456 ssn 912-34-5678",
+            )
+            .is_empty());
+    }
+
+    // ---------- IpV4Recognizer ----------
+
+    #[test]
+    fn ipv4_accepts_valid_public_address() {
+        let r = IpV4Recognizer::new();
+        assert_eq!(r.analyze("f", "DNS: 8.8.8.8").len(), 1);
+    }
+
+    #[test]
+    fn ipv4_rejects_reserved_ranges() {
+        let r = IpV4Recognizer::new();
+        let text = "127.0.0.1 0.0.0.0 255.255.255.255 169.254.1.1 192.0.2.1 198.51.100.1 203.0.113.1";
+        assert!(r.analyze("f", text).is_empty());
+    }
+
+    #[test]
+    fn ipv4_rejects_oid_embedded_in_dotted_identifier() {
+        // `1.2.543.1.34.1.34.134` - OID, not an IP.
+        let r = IpV4Recognizer::new();
+        assert!(r.analyze("f", "oid: 1.2.543.1.34.1.34.134").is_empty());
+    }
+
+    #[test]
+    fn ipv4_rejects_svg_path_floats() {
+        let r = IpV4Recognizer::new();
+        assert!(r
+            .analyze("f", r#"<path d="M1.5.75.75 1.12.34.56"/>"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn ipv4_rejects_version_lines() {
+        let r = IpV4Recognizer::new();
+        assert!(r.analyze("f", "version = 1.2.3.4").is_empty());
+    }
+
+    // ---------- IpV6Recognizer ----------
+
+    #[test]
+    fn ipv6_accepts_valid() {
+        let r = IpV6Recognizer::new();
+        assert_eq!(r.analyze("f", "server 2001:4860:4860::8888").len(), 1);
+    }
+
+    #[test]
+    fn ipv6_rejects_loopback_and_doc_range() {
+        let r = IpV6Recognizer::new();
+        assert!(r.analyze("f", "a ::1 b 2001:db8::1 c").is_empty());
+    }
+
+    #[test]
+    fn ipv6_rejects_endgroup_sentinel() {
+        // GitHub Actions log prefix `::endgroup::` - `::e` should not match.
+        let r = IpV6Recognizer::new();
+        assert!(r.analyze("f", "echo ::endgroup::").is_empty());
+    }
+
+    // ---------- UrlRecognizer ----------
+
+    #[test]
+    fn url_accepts_https_with_path() {
+        let r = UrlRecognizer::new();
+        assert_eq!(
+            r.analyze("f", "see https://example.com/path for details")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn url_rejects_bare_filename() {
+        let r = UrlRecognizer::new();
+        assert!(r.analyze("f", "open foo.py to edit").is_empty());
+    }
+
+    // ---------- MacRecognizer ----------
+
+    #[test]
+    fn mac_accepts_all_formats() {
+        let r = MacRecognizer::new();
+        assert_eq!(r.analyze("f", "mac 01:23:45:67:89:AB").len(), 1);
+        assert_eq!(r.analyze("f", "mac 01-23-45-67-89-AB").len(), 1);
+        assert_eq!(r.analyze("f", "mac 0123.4567.89AB").len(), 1);
+    }
+
+    // ---------- IbanRecognizer ----------
+
+    #[test]
+    fn iban_accepts_valid_checksum() {
+        let r = IbanRecognizer::new();
+        assert_eq!(r.analyze("f", "acct GB82WEST12345698765432 ok").len(), 1);
+    }
+
+    #[test]
+    fn iban_rejects_bad_checksum() {
+        let r = IbanRecognizer::new();
+        assert!(r.analyze("f", "acct GB82WEST12345698765431 ok").is_empty());
+    }
+
+    // ---------- CryptoRecognizer ----------
+
+    #[test]
+    fn crypto_accepts_genesis_base58check() {
+        let r = CryptoRecognizer::new();
+        assert_eq!(
+            r.analyze("f", "btc: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn crypto_rejects_bad_base58check() {
+        let r = CryptoRecognizer::new();
+        assert!(r
+            .analyze("f", "btc: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivAAA")
+            .is_empty());
+    }
+
+    // ---------- Helpers ----------
+
+    #[test]
+    fn luhn_validates_standard_test_numbers() {
+        assert!(luhn_valid("4532015112830366"));
+        assert!(luhn_valid("4111111111111111"));
+        assert!(!luhn_valid("4532015112830367"));
+    }
+
+    #[test]
+    fn card_entropy_requires_four_distinct_digits() {
+        assert!(!has_card_entropy("1111111111111111"));
+        assert!(!has_card_entropy("1212121212121212"));
+        assert!(has_card_entropy("4532015112830366"));
+    }
+
+    #[test]
+    fn ipv4_shape_requires_four_short_digit_groups() {
+        assert!(is_ipv4_shape("1.2.3.4"));
+        assert!(is_ipv4_shape("192.168.1.1"));
+        assert!(!is_ipv4_shape("1.2.3"));
+        assert!(!is_ipv4_shape("1.2.3.4.5"));
+        assert!(!is_ipv4_shape("1.2.3.abc"));
+    }
+
+    #[test]
+    fn phone_shape_caps_digit_groups_at_five() {
+        assert!(has_phone_shape("(415) 555-2671"));
+        assert!(has_phone_shape("+16025550123"));
+        assert!(!has_phone_shape("75.3128264600394"));
+    }
+
+    #[test]
+    fn phone_context_recognizes_common_labels() {
+        assert!(phone_context_mentioned("Call 6025550123"));
+        assert!(phone_context_mentioned("phone: 6025550123"));
+        assert!(phone_context_mentioned("tel: 6025550123"));
+        assert!(!phone_context_mentioned("id: 6025550123"));
+    }
+
+    #[test]
+    fn ssn_context_recognizes_ssn_labels() {
+        assert!(ssn_context_mentioned("ssn: 123456789"));
+        assert!(ssn_context_mentioned("Social Security Number: 123456789"));
+        assert!(!ssn_context_mentioned("sample_id: 123456789"));
+    }
+
+    #[test]
+    fn iban_mod97_known_values() {
+        assert!(iban_mod97_valid("GB82WEST12345698765432"));
+        assert!(!iban_mod97_valid("GB82WEST12345698765431"));
+    }
+
+    #[test]
+    fn base58check_genesis_address() {
+        assert!(base58check_valid("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+        assert!(!base58check_valid("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivAAA"));
+    }
+}

@@ -316,3 +316,229 @@ fn text_matches(entry: &IgnoreEntry, f: &Finding) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_finding(entity: &str, text: &str, file: &str, line: u32) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line_num: line,
+            col_start: 0,
+            col_end: text.len() as u32,
+            entity_type: entity.to_string(),
+            text: text.to_string(),
+            score: 1.0,
+            line_content: text.to_string(),
+        }
+    }
+
+    fn with_entries(entries: Vec<IgnoreEntry>) -> Ignorelist {
+        let mut list = Ignorelist::default();
+        for e in entries {
+            list.append(e);
+        }
+        list
+    }
+
+    #[test]
+    fn text_match_is_case_insensitive() {
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("admin@example.com".into()),
+            ..Default::default()
+        };
+        let f = mk_finding("EMAIL_ADDRESS", "Admin@Example.COM", "x", 1);
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&f));
+    }
+
+    #[test]
+    fn email_domain_wildcard_matches_by_domain() {
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("@askclara.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "user@askclara.com",
+            "x",
+            1
+        )));
+        assert!(!list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "user@other.com",
+            "x",
+            1
+        )));
+    }
+
+    #[test]
+    fn email_username_wildcard_matches_by_user() {
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("noreply@".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "noreply@any.tld",
+            "x",
+            1
+        )));
+    }
+
+    #[test]
+    fn pattern_regex_takes_precedence_over_text() {
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            pattern: Some(r"@\w+\.askclara\.com$".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "a@staging.askclara.com",
+            "x",
+            1
+        )));
+        assert!(!list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "a@example.com",
+            "x",
+            1
+        )));
+    }
+
+    #[test]
+    fn scope_file_limits_to_single_file() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("file".into()),
+            file: Some("docs/a.md".into()),
+            text: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://example.com", "docs/a.md", 1)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://example.com", "docs/b.md", 1)));
+    }
+
+    #[test]
+    fn scope_line_limits_to_file_and_line() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("line".into()),
+            file: Some("x".into()),
+            line: Some("42".into()),
+            text: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://example.com", "x", 42)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://example.com", "x", 43)));
+    }
+
+    #[test]
+    fn whole_file_skip_ignores_path_entirely() {
+        let entry = IgnoreEntry {
+            kind: Some("file".into()),
+            file: Some("vendor/bundle.js".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_file_skipped("vendor/bundle.js"));
+        assert!(!list.is_file_skipped("src/app.js"));
+    }
+
+    #[test]
+    fn missing_text_matches_any() {
+        // `text` omitted means "ignore all findings of this entity in this file".
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("file".into()),
+            file: Some("x".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://a.com", "x", 1)));
+        assert!(list.is_ignored(&mk_finding("URL", "https://b.com", "x", 2)));
+    }
+
+    #[test]
+    fn entities_disable_is_read_from_toml() {
+        let text = r#"
+[entities]
+URL = false
+MAC_ADDRESS = true
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let list = Ignorelist::load_or_empty(&path).unwrap();
+        assert!(list.is_entity_disabled("URL"));
+        assert!(!list.is_entity_disabled("MAC_ADDRESS"));
+        assert!(!list.is_entity_disabled("EMAIL_ADDRESS"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sort_key_puts_whole_file_skips_first() {
+        let whole = IgnoreEntry {
+            kind: Some("file".into()),
+            file: Some("a".into()),
+            ..Default::default()
+        };
+        let regular = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("global".into()),
+            text: Some("https://x".into()),
+            ..Default::default()
+        };
+        let mut v = vec![regular.clone(), whole.clone()];
+        v.sort_by_key(sort_key);
+        assert_eq!(v[0].kind.as_deref(), Some("file"));
+    }
+
+    #[test]
+    fn sort_key_orders_by_entity_then_scope() {
+        let email_global = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("a".into()),
+            ..Default::default()
+        };
+        let url_file = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("file".into()),
+            file: Some("f".into()),
+            text: Some("b".into()),
+            ..Default::default()
+        };
+        let email_line = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("line".into()),
+            file: Some("f".into()),
+            line: Some("1".into()),
+            text: Some("c".into()),
+            ..Default::default()
+        };
+        let mut v = vec![url_file, email_line, email_global];
+        v.sort_by_key(sort_key);
+        // EMAIL_ADDRESS group first (alphabetical), global (rank 0) before line (rank 2).
+        assert_eq!(v[0].entity_type.as_deref(), Some("EMAIL_ADDRESS"));
+        assert_eq!(v[0].scope.as_deref(), Some("global"));
+        assert_eq!(v[1].entity_type.as_deref(), Some("EMAIL_ADDRESS"));
+        assert_eq!(v[1].scope.as_deref(), Some("line"));
+        assert_eq!(v[2].entity_type.as_deref(), Some("URL"));
+    }
+}
