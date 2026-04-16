@@ -250,6 +250,13 @@ impl Recognizer for PhoneRecognizer {
             if !(10..=15).contains(&digit_count) {
                 continue;
             }
+            // Reject floating-point / long-ID shapes: phones never have a
+            // digit group larger than 5 once you factor in separators.
+            // `75.3128264600394` (sleep latency seconds) has a 13-digit group
+            // and would otherwise pass phonenumber::parse.
+            if !has_phone_shape(raw) {
+                continue;
+            }
             let valid = self.regions.iter().any(|r| {
                 phonenumber::parse(Some(*r), raw).is_ok_and(|n| phonenumber::is_valid(&n))
             });
@@ -271,6 +278,40 @@ impl Recognizer for PhoneRecognizer {
         }
         out
     }
+}
+
+/// Scan a phone-candidate match for digit groups split by separators.
+/// Real phone numbers cap individual groups at 5 digits (US subscriber block,
+/// or long international subscriber sections). Floating-point literals like
+/// `75.3128264600394` have a trailing group of 13+ digits — easy to reject.
+/// Pure-digit runs (including `+CC` prefix) are allowed and left to
+/// `phonenumber::parse`.
+fn has_phone_shape(raw: &str) -> bool {
+    // `+` is a country-code marker, not a group separator — `+16025550123`
+    // is a single unbroken digit group.
+    let body = raw.strip_prefix('+').unwrap_or(raw);
+    let mut current = 0usize;
+    let mut max_group = 0usize;
+    let mut has_separator = false;
+    for ch in body.chars() {
+        if ch.is_ascii_digit() {
+            current += 1;
+        } else if matches!(ch, '-' | '.' | ' ' | '(' | ')') {
+            has_separator = true;
+            if current > max_group {
+                max_group = current;
+            }
+            current = 0;
+        }
+        // other chars are ignored (regex shouldn't match them anyway)
+    }
+    if current > max_group {
+        max_group = current;
+    }
+    if !has_separator {
+        return true;
+    }
+    max_group <= 5
 }
 
 // =============================================================================

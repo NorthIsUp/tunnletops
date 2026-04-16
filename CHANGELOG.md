@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-04-16
+
+### Fixed
+
+- **Phone false positive on floating-point literals** like
+  `"sleep_latency_seconds": 75.3128264600394`. Added a shape check:
+  with separators present, no digit group may exceed 5 digits. `+CC`
+  prefixes don't count as group-breaking separators (so `+16025550123`
+  still matches correctly).
+
+### Changed
+
+- Walker now uses ripgrep's `ignore` crate instead of shelling out to
+  `git ls-files`. Respects `.gitignore`, `.ignore`, `.git/info/exclude`,
+  and global `core.excludesFile`. Works in non-git trees too.
+
 ## [0.5.12] - 2026-04-16
 
 ### Fixed

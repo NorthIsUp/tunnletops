@@ -52,32 +52,37 @@ pub fn discover_files(paths: &[PathBuf], pr_mode: bool) -> Result<Vec<PathBuf>> 
 }
 
 fn discover_git_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut cmd = Command::new("git");
-    cmd.arg("ls-files").arg("-z").arg("--");
-    if paths.is_empty() {
-        cmd.arg(".");
+    // Use ripgrep's `ignore` crate to respect .gitignore, .ignore,
+    // .git/info/exclude, and global git ignore. Works outside git too.
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![PathBuf::from(".")]
     } else {
-        for p in paths {
-            cmd.arg(p);
-        }
+        paths.to_vec()
+    };
+    let (first, rest) = roots.split_first().expect("at least one root");
+    let mut builder = ignore::WalkBuilder::new(first);
+    for p in rest {
+        builder.add(p);
     }
-    let out = cmd.output().context("running git ls-files")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    // Don't hide dotfiles — let .gitignore decide. Files like .github/*
+    // should still be scanned.
+    builder.hidden(false);
+    builder.standard_filters(true);
+
     let mut files = Vec::new();
-    for chunk in out.stdout.split(|b| *b == 0) {
-        if chunk.is_empty() {
+    for result in builder.build() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let p = PathBuf::from(std::str::from_utf8(chunk).context("non-utf8 path")?);
-        if has_skipped_extension(&p) || has_skipped_dir_component(&p) {
+        let path = entry.path().to_path_buf();
+        if has_skipped_extension(&path) || has_skipped_dir_component(&path) {
             continue;
         }
-        files.push(p);
+        files.push(path);
     }
     Ok(files)
 }
