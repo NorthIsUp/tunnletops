@@ -403,6 +403,13 @@ fn ssn_context_mentioned(line: &str) -> bool {
 
 pub struct IpV4Recognizer {
     re: Regex,
+    /// Line-context invalidators: if the finding's line matches any of these,
+    /// drop the finding. Catches IPv4 shapes embedded in SVG path data
+    /// (`d="M1.5.75.75..."`) and version strings.
+    line_invalidators: Vec<Regex>,
+    /// Match-text invalidators: if the matched text itself matches, drop.
+    /// Built-in list of reserved / loopback / unspecified / broadcast ranges.
+    match_invalidators: Vec<Regex>,
 }
 
 impl IpV4Recognizer {
@@ -412,6 +419,27 @@ impl IpV4Recognizer {
                 r"\b(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?:/(?:[0-2]?\d|3[0-2]))?\b",
             )
             .unwrap(),
+            line_invalidators: vec![
+                // SVG markup on the same line — path data is full of floats.
+                Regex::new(r#"<svg|<path|viewBox|d=["']?[Mm]|fill-rule|stroke-width"#).unwrap(),
+                // Hardcoded version strings like `1.2.3.4` used as semver-ish
+                // markers often live after `version`, `v=`, etc.
+                Regex::new(r"(?i)\bversion\s*[:=]").unwrap(),
+            ],
+            match_invalidators: vec![
+                // Loopback (127.0.0.0/8)
+                Regex::new(r"^127\.").unwrap(),
+                // Unspecified / "any" address
+                Regex::new(r"^0\.0\.0\.0").unwrap(),
+                // Broadcast
+                Regex::new(r"^255\.255\.255\.255").unwrap(),
+                // Link-local (169.254.0.0/16)
+                Regex::new(r"^169\.254\.").unwrap(),
+                // Documentation ranges from RFC 5737
+                Regex::new(r"^192\.0\.2\.").unwrap(),
+                Regex::new(r"^198\.51\.100\.").unwrap(),
+                Regex::new(r"^203\.0\.113\.").unwrap(),
+            ],
         }
     }
 }
@@ -421,7 +449,37 @@ impl Recognizer for IpV4Recognizer {
         "IP_ADDRESS"
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
-        regex_emit(file, text, &self.re, self.entity_type(), 1.0)
+        let line_starts = compute_line_starts(text);
+        let mut out = Vec::new();
+        for m in self.re.find_iter(text) {
+            if self
+                .match_invalidators
+                .iter()
+                .any(|re| re.is_match(m.as_str()))
+            {
+                continue;
+            }
+            let (line_num, col_start, col_end, line_content) =
+                resolve_position(text, &line_starts, m.start(), m.end());
+            if self
+                .line_invalidators
+                .iter()
+                .any(|re| re.is_match(&line_content))
+            {
+                continue;
+            }
+            out.push(Finding {
+                file: file.to_string(),
+                line_num,
+                col_start,
+                col_end,
+                entity_type: self.entity_type().to_string(),
+                text: m.as_str().to_string(),
+                score: 1.0,
+                line_content,
+            });
+        }
+        out
     }
 }
 
@@ -469,6 +527,18 @@ impl Recognizer for IpV6Recognizer {
                 if next == b':' || next.is_ascii_alphanumeric() || next == b'_' {
                     continue;
                 }
+            }
+            let matched = m.as_str();
+            // Localhost / unspecified / documentation IPv6 built-ins.
+            if matches!(
+                matched,
+                "::1" | "::" | "0:0:0:0:0:0:0:1" | "0:0:0:0:0:0:0:0"
+            ) {
+                continue;
+            }
+            // Documentation range 2001:db8::/32 (RFC 3849)
+            if matched.starts_with("2001:db8:") || matched.starts_with("2001:DB8:") {
+                continue;
             }
             let (line_num, col_start, col_end, line_content) =
                 resolve_position(text, &line_starts, m.start(), m.end());

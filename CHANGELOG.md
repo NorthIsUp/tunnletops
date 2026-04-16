@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-04-16
+
+### Added
+
+- `IpV4Recognizer` and `IpV6Recognizer` gain invalidators — post-match
+  filters that drop false positives without extending the main regex:
+  - **Line-context** invalidators for IPv4: SVG path data
+    (`<svg`, `<path`, `viewBox`, `d="M…"`, `fill-rule`, `stroke-width`)
+    and version-string contexts (`version = ...`). Handles shapes like
+    `d="M1.5.75.75 0 0 1-1.5z"` in inline SVG.
+  - **Match-text** invalidators for reserved / built-in ranges:
+    - IPv4: `127.0.0.0/8` loopback, `0.0.0.0` unspecified,
+      `255.255.255.255` broadcast, `169.254.0.0/16` link-local,
+      and RFC 5737 documentation ranges (`192.0.2.0/24`,
+      `198.51.100.0/24`, `203.0.113.0/24`).
+    - IPv6: `::1` loopback, `::` unspecified, full forms
+      `0:0:0:0:0:0:0:{0,1}`, and RFC 3849 `2001:db8::/32`
+      documentation range.
+
 ## [0.5.13] - 2026-04-16
 
 ### Fixed
