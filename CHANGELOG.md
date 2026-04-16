@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-04-15
+
+### Changed
+
+- `--fix` is now a proper full-screen ratatui TUI (alternate screen,
+  raw mode, single-keypress). Findings stream in from the scan pipeline
+  as they're discovered — triage starts immediately on the first
+  finding instead of waiting for the full scan. Header shows live scan
+  progress while you work. Keys unchanged: `y`/Enter, `g`, `n`, `a`,
+  `q`/Esc, `?`, Ctrl-C.
+
 ## [0.5.17] - 2026-04-15
 
 ### Added

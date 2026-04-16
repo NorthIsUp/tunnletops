@@ -173,6 +173,20 @@ fn main() -> Result<()> {
         cli.verbose,
         entity_filter,
     );
+
+    // --fix: hand the receiver straight to the TUI so it can triage findings
+    // as they arrive. The scan pipeline continues in the background — the
+    // user never waits for the full scan before triaging.
+    if cli.fix {
+        let write_path = ignorelist_path.with_file_name("phi.toml");
+        let has_remaining = output::fix_interactive(
+            receiver,
+            write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
+        )?;
+        drop(results);
+        std::process::exit(if has_remaining { 1 } else { 0 });
+    }
+
     let formatter = Formatter::new(cli.format, cli.only_issues);
     let all_findings = stream_and_collect(receiver, &formatter)?;
 
@@ -183,12 +197,6 @@ fn main() -> Result<()> {
         // if we read a legacy `.yaml`. This is the friendly upgrade path.
         let write_path = ignorelist_path.with_file_name("phi.toml");
         output::fix_accept_all(
-            &all_findings,
-            write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
-        )?;
-    } else if cli.fix {
-        let write_path = ignorelist_path.with_file_name("phi.toml");
-        output::fix_interactive(
             &all_findings,
             write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
         )?;
