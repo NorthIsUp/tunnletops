@@ -183,7 +183,7 @@ impl Ignorelist {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let mut ignored = self.entries.clone();
-        ignored.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        ignored.sort_by_key(sort_key);
         let file = IgnorelistFile {
             ignored,
             entities: EntitiesConfig {

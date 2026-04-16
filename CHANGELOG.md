@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-04-16
+
+### Fixed
+
+- Replace `sort_by` with `sort_by_key` to satisfy clippy (v0.5.4 release
+  workflow failed on this lint).
+- Remove stray `.baselines/phi.toml` that accidentally landed in v0.5.4.
+
 ## [0.5.4] - 2026-04-16
 
 ### Added
