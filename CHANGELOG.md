@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-04-16
+
+### Added
+
+- `pattern` field on `[[ignored]]` entries — a regex matched against the
+  finding's text. Takes precedence over `text` when both are set. Use
+  TOML literal strings (single quotes) to avoid double-escaping:
+
+  ```toml
+  [[ignored]]
+  entity_type = "EMAIL_ADDRESS"
+  scope       = "global"
+  pattern     = '@[\w.-]*\.?clarahealth\.com$'
+  ```
+
+  Regexes are compiled once at load time. Invalid patterns print a warning
+  and are skipped (the rule is ignored, not the whole file).
+
 ## [0.5.2] - 2026-04-16
 
 ### Changed

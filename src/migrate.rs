@@ -59,6 +59,7 @@ pub fn migrate(input: &Path, output: &Path) -> Result<()> {
             }),
             entity_type: e.entity_type,
             text: e.text,
+            pattern: None,
         });
     }
 

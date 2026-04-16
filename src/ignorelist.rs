@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::finding::Finding;
@@ -28,6 +29,15 @@ pub struct IgnoreEntry {
     pub entity_type: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional regex applied to the finding's text. When set, takes
+    /// precedence over `text`. Use TOML literal strings (single quotes)
+    /// to avoid double-escaping backslashes:
+    ///
+    /// ```toml
+    /// pattern = '@\w+\.askclara\.com'
+    /// ```
+    #[serde(default)]
+    pub pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,6 +68,8 @@ pub struct EntitiesConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Ignorelist {
     entries: Vec<IgnoreEntry>,
+    /// Parallel to `entries`: compiled regex for entries with `pattern` set.
+    compiled_patterns: Vec<Option<Regex>>,
     whole_file_skips: HashSet<String>,
     disabled_entities: HashSet<String>,
 }
@@ -79,7 +91,19 @@ impl Ignorelist {
                     out.whole_file_skips.insert(f.clone());
                 }
             }
+            let compiled = e.pattern.as_ref().and_then(|p| match Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(err) => {
+                    eprintln!(
+                        "warning: invalid pattern in {}: {} (skipping this ignore rule)",
+                        path.display(),
+                        err
+                    );
+                    None
+                }
+            });
             out.entries.push(e);
+            out.compiled_patterns.push(compiled);
         }
         out.disabled_entities = file
             .entities
@@ -99,7 +123,7 @@ impl Ignorelist {
     }
 
     pub fn is_ignored(&self, f: &Finding) -> bool {
-        for entry in &self.entries {
+        for (entry, compiled) in self.entries.iter().zip(self.compiled_patterns.iter()) {
             if entry.kind.as_deref() == Some("file") {
                 if entry.file.as_deref() == Some(f.file.as_str()) {
                     return true;
@@ -111,7 +135,7 @@ impl Ignorelist {
                     continue;
                 }
             }
-            if !text_matches(entry, f) {
+            if !matches_criteria(entry, compiled.as_ref(), f) {
                 continue;
             }
             match entry.scope.as_deref() {
@@ -142,7 +166,9 @@ impl Ignorelist {
                 self.whole_file_skips.insert(file.clone());
             }
         }
+        let compiled = entry.pattern.as_ref().and_then(|p| Regex::new(p).ok());
         self.entries.push(entry);
+        self.compiled_patterns.push(compiled);
     }
 
     #[allow(dead_code)]
@@ -165,6 +191,15 @@ impl Ignorelist {
         fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+}
+
+/// Return `true` if this ignore entry's match criteria apply to the finding.
+/// `pattern` (precompiled regex) takes precedence over `text` when set.
+fn matches_criteria(entry: &IgnoreEntry, compiled: Option<&Regex>, f: &Finding) -> bool {
+    if let Some(re) = compiled {
+        return re.is_match(&f.text);
+    }
+    text_matches(entry, f)
 }
 
 /// Port of phi-scan's text-matching logic in `_is_ignored`. A missing text

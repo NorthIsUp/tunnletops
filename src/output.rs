@@ -152,6 +152,7 @@ pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result
                 line: None,
                 entity_type: Some(f.entity_type.clone()),
                 text: Some(f.text.clone()),
+                pattern: None,
             });
             added += 1;
         }
