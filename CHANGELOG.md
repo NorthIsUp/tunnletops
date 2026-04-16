@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-04-15
+
+### Changed
+
+- Reworked `--fix` TUI keybindings around a clear ignore-scope verb:
+  - `l` ignore the line (`path` + `line`)
+  - `f` ignore the file (`path`)
+  - `d` ignore the directory (`path = "dir/**"`)
+  - `g` ignore globally (no `path`)
+  - `a` ignore all remaining (+ anything still arriving)
+  - `[` / `]` shrink / grow context window
+  - `q` / Esc / Ctrl-C quit & save
+  - `h` / `?` toggle help
+- Dropped the confusing "keep" key. If a finding isn't ignored, it
+  stays a finding — quit to leave the rest unreviewed.
+
 ## [0.5.21] - 2026-04-15
 
 ### Changed

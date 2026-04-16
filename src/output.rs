@@ -239,14 +239,15 @@ fn plural<'a>(n: usize, singular: &'a str, many: &'a str) -> &'a str {
 /// Returns `true` if any findings remain unaddressed (kept or unreviewed) —
 /// caller uses this for the process exit code.
 ///
-/// Keys:
-///   y / Enter — ignore in this file (`scope = "file"`)
-///   g         — ignore globally (`scope = "global"`)
-///   n         — keep the finding
-///   a         — accept all queued + anything still to arrive
-///   q / Esc   — save accepted rules and quit
-///   ?         — toggle help footer
-///   Ctrl-C    — quit (same as q)
+/// Keys — all four ignore actions write an `[[ignored]]` entry and advance:
+///   l           — ignore this line only       (path + line)
+///   f           — ignore this file            (path)
+///   d           — ignore this directory       (path = "dir/**")
+///   g           — ignore globally             (no path)
+///   a           — ignore all queued + everything still to arrive
+///   [ / ]       — shrink / grow the context window (±N lines)
+///   q / Esc / ^C — save and quit
+///   h / ?       — toggle help footer
 pub fn fix_interactive(
     receiver: Receiver<FileOutcome>,
     ignorelist_path: &str,
@@ -282,20 +283,18 @@ pub fn fix_interactive(
         );
     } else {
         eprintln!(
-            "ignored {}, kept {}, {} not reviewed · scanned {} files, skipped {}",
+            "ignored {}, {} not reviewed · scanned {} files, skipped {}",
             outcome.added,
-            outcome.kept,
             outcome.unreviewed,
             outcome.files_scanned,
             outcome.files_skipped
         );
     }
-    Ok(outcome.kept > 0 || outcome.unreviewed > 0)
+    Ok(outcome.unreviewed > 0)
 }
 
 struct StreamOutcome {
     added: usize,
-    kept: usize,
     unreviewed: usize,
     queue_len: usize,
     files_scanned: usize,
@@ -313,7 +312,6 @@ fn run_streaming_tui(
     let mut context_radius: usize = DEFAULT_CONTEXT_RADIUS;
     let mut idx = 0usize;
     let mut added = 0usize;
-    let mut kept = 0usize;
     let mut files_scanned = 0usize;
     let mut files_skipped = 0usize;
     let mut scan_done = false;
@@ -377,7 +375,6 @@ fn run_streaming_tui(
             idx,
             queue_len: queue.len(),
             added,
-            kept,
             files_scanned,
             files_skipped,
             scan_done,
@@ -401,7 +398,9 @@ fn run_streaming_tui(
             continue;
         }
         match key.code {
-            KeyCode::Char('?') => show_help = !show_help,
+            KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => {
+                show_help = !show_help
+            }
             KeyCode::Char('[') => context_radius = context_radius.saturating_sub(2),
             KeyCode::Char(']') => context_radius = (context_radius + 2).min(20),
             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => quit = true,
@@ -416,8 +415,18 @@ fn run_streaming_tui(
             _ if idx >= queue.len() => {
                 // No current finding — most keys do nothing while waiting for scan.
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                ignorelist.append(line_scope_entry(&queue[idx]));
+                added += 1;
+                idx += 1;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
                 ignorelist.append(file_scope_entry(&queue[idx]));
+                added += 1;
+                idx += 1;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                ignorelist.append(dir_scope_entry(&queue[idx]));
                 added += 1;
                 idx += 1;
             }
@@ -426,17 +435,12 @@ fn run_streaming_tui(
                 added += 1;
                 idx += 1;
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                kept += 1;
-                idx += 1;
-            }
             _ => {}
         }
     }
 
     Ok(StreamOutcome {
         added,
-        kept,
         unreviewed: queue.len().saturating_sub(idx),
         queue_len: queue.len(),
         files_scanned,
@@ -457,7 +461,6 @@ struct RenderState<'a> {
     idx: usize,
     queue_len: usize,
     added: usize,
-    kept: usize,
     files_scanned: usize,
     files_skipped: usize,
     scan_done: bool,
@@ -667,55 +670,55 @@ fn render_waiting(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderStat
 fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState) {
     let keys = if s.show_help {
         Line::from(vec![
-            Span::raw("y "),
-            Span::styled("ignore in this file  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("ignore ", Style::default().fg(Color::DarkGray)),
+            Span::raw("l "),
+            Span::styled("line  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("f "),
+            Span::styled("file  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("d "),
+            Span::styled("directory  ", Style::default().fg(Color::DarkGray)),
             Span::raw("g "),
-            Span::styled("ignore globally  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("n "),
-            Span::styled("keep  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("globally   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("a "),
-            Span::styled("accept all remaining  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("[ "),
-            Span::styled("less context  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("] "),
+            Span::styled("all remaining   ·  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("[ ] "),
             Span::styled(
-                format!("more context (±{})  ", s.context_radius),
+                format!("context ±{}   ·  ", s.context_radius),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw("q/Esc/^C "),
             Span::styled("quit & save  ", Style::default().fg(Color::DarkGray)),
-            Span::raw("? "),
+            Span::raw("h "),
             Span::styled("toggle help", Style::default().fg(Color::DarkGray)),
         ])
     } else {
         Line::from(vec![
-            key_chip("y", "ignore file", Color::Green),
+            Span::styled(
+                "ignore ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            ),
+            key_chip("l", "ine", Color::Green),
+            Span::raw("  "),
+            key_chip("f", "ile", Color::Green),
+            Span::raw("  "),
+            key_chip("d", "ir", Color::Green),
             Span::raw("  "),
             key_chip("g", "lobal", Color::Green),
-            Span::raw("  "),
-            key_chip("n", "keep", Color::Yellow),
-            Span::raw("  "),
-            key_chip("a", "ll", Color::Green),
-            Span::raw("  "),
-            key_chip("[", "]", Color::Cyan),
+            Span::styled("   ·   ", Style::default().fg(Color::DarkGray)),
+            key_chip("a", "ll", Color::Yellow),
             Span::styled(
-                format!(" ±{}  ", s.context_radius),
+                format!("   [ ] ±{}   ", s.context_radius),
                 Style::default().fg(Color::DarkGray),
             ),
             key_chip("q", "uit", Color::Red),
             Span::raw("  "),
-            key_chip("?", "help", Color::DarkGray),
+            key_chip("h", "elp", Color::DarkGray),
         ])
     };
     let stats = Line::from(vec![
         Span::styled(
             format!(" ignored {} ", s.added),
             Style::default().fg(Color::Green),
-        ),
-        Span::raw("·"),
-        Span::styled(
-            format!(" kept {} ", s.kept),
-            Style::default().fg(Color::Yellow),
         ),
         Span::raw("·"),
         Span::styled(
@@ -739,11 +742,42 @@ fn key_chip(key: &str, label: &str, color: Color) -> Span<'static> {
     )
 }
 
+fn line_scope_entry(f: &Finding) -> IgnoreEntry {
+    // `path` + `line` → line scope (inferred on load).
+    IgnoreEntry {
+        entity_type: Some(f.entity_type.clone()),
+        path: Some(f.file.clone()),
+        line: Some(f.line_num.to_string()),
+        text: Some(f.text.clone()),
+        ..Default::default()
+    }
+}
+
 fn file_scope_entry(f: &Finding) -> IgnoreEntry {
     // `path` present → file scope (inferred on load).
     IgnoreEntry {
         entity_type: Some(f.entity_type.clone()),
         path: Some(f.file.clone()),
+        text: Some(f.text.clone()),
+        ..Default::default()
+    }
+}
+
+fn dir_scope_entry(f: &Finding) -> IgnoreEntry {
+    // File-scope with a `dir/**` glob — ignores `text` anywhere under the
+    // finding's parent directory. Findings at the repo root (no parent)
+    // fall back to a plain `**` (whole-tree) glob.
+    let parent = std::path::Path::new(&f.file)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty());
+    let glob = match parent {
+        Some(p) => format!("{}/**", p),
+        None => "**".to_string(),
+    };
+    IgnoreEntry {
+        entity_type: Some(f.entity_type.clone()),
+        path: Some(glob),
         text: Some(f.text.clone()),
         ..Default::default()
     }
