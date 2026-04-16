@@ -18,9 +18,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: tunnletops-aarch64-linux
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact: tunnletops-x86_64-darwin
+          # x86_64-apple-darwin dropped: ort doesn't publish prebuilt
+          # ONNX Runtime binaries for it. Apple Silicon covers modern Macs;
+          # Intel users can run the aarch64 build via Rosetta.
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: tunnletops-aarch64-darwin
