@@ -682,7 +682,7 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
                 format!("more context (±{})  ", s.context_radius),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::raw("q "),
+            Span::raw("q/Esc/^C "),
             Span::styled("quit & save  ", Style::default().fg(Color::DarkGray)),
             Span::raw("? "),
             Span::styled("toggle help", Style::default().fg(Color::DarkGray)),
@@ -740,26 +740,21 @@ fn key_chip(key: &str, label: &str, color: Color) -> Span<'static> {
 }
 
 fn file_scope_entry(f: &Finding) -> IgnoreEntry {
+    // `path` present → file scope (inferred on load).
     IgnoreEntry {
-        kind: None,
-        scope: Some("file".to_string()),
-        file: Some(f.file.clone()),
-        line: None,
         entity_type: Some(f.entity_type.clone()),
+        path: Some(f.file.clone()),
         text: Some(f.text.clone()),
-        pattern: None,
+        ..Default::default()
     }
 }
 
 fn global_scope_entry(f: &Finding) -> IgnoreEntry {
+    // `path` absent → global scope (inferred on load).
     IgnoreEntry {
-        kind: None,
-        scope: Some("global".to_string()),
-        file: None,
-        line: None,
         entity_type: Some(f.entity_type.clone()),
         text: Some(f.text.clone()),
-        pattern: None,
+        ..Default::default()
     }
 }
 
@@ -781,7 +776,7 @@ pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result
     let mut added = 0usize;
     for outcome in outcomes {
         for f in &outcome.findings {
-            // Use `scope = "file"` (not "line") so the ignore survives when
+            // File-scoped (path present, no line) so the ignore survives when
             // the line shifts from edits above it. Matches any occurrence of
             // `(entity_type, text)` in this file. Dedupe so we don't write
             // the same entry once per occurrence.
@@ -789,15 +784,7 @@ pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result
             if !seen.insert(key) {
                 continue;
             }
-            ignorelist.append(IgnoreEntry {
-                kind: None,
-                scope: Some("file".to_string()),
-                file: Some(f.file.clone()),
-                line: None,
-                entity_type: Some(f.entity_type.clone()),
-                text: Some(f.text.clone()),
-                pattern: None,
-            });
+            ignorelist.append(file_scope_entry(f));
             added += 1;
         }
     }

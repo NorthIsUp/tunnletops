@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.21] - 2026-04-15
+
+### Changed
+
+- Renamed `file` to `path` in `[[ignored]]` entries. `file` is still
+  accepted as a read-only alias for backward compatibility; `save()`
+  writes `path`.
+- `path` now supports shell-style glob syntax: `*`, `?`, `[...]`, and
+  `**` for recursive directory match. Example:
+  ```toml
+  [[ignored]]
+  entity_type = "IP_ADDRESS"
+  path        = "documentation/**"
+  ```
+- `scope` is inferred from which fields are set:
+  - `line` present → line scope
+  - `path` present → file scope
+  - neither        → global scope
+
+  Explicit `scope = "…"` still wins; `save()` drops redundant explicit
+  scopes, so ignorelists get cleaner over time.
+
 ## [0.5.20] - 2026-04-15
 
 ### Added

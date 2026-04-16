@@ -40,7 +40,7 @@ pub fn load_legacy_yaml(yaml_text: &str) -> Result<IgnorelistFile> {
     // when a `type: file` entry has no explicit `file:` field. Preserve that.
     let mut entries: Vec<IgnoreEntry> = Vec::with_capacity(legacy.ignored.len());
     for (key, e) in legacy.ignored {
-        let file = e.file.or_else(|| {
+        let path = e.file.or_else(|| {
             if e.kind.as_deref() == Some("file") {
                 Some(key.clone())
             } else {
@@ -50,7 +50,7 @@ pub fn load_legacy_yaml(yaml_text: &str) -> Result<IgnorelistFile> {
         entries.push(IgnoreEntry {
             kind: e.kind,
             scope: e.scope,
-            file,
+            path,
             line: e.line.and_then(|v| match v {
                 serde_yaml::Value::String(s) => Some(s),
                 serde_yaml::Value::Number(n) => Some(n.to_string()),

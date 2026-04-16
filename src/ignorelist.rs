@@ -10,16 +10,24 @@ use crate::finding::Finding;
 
 /// Matches the phi.yaml semantic model:
 /// - `type: "file"` entries skip the entire file (whole-file ignore).
-/// - `scope: "line"` matches on (file, line_num, entity_type, text).
-/// - `scope: "file"` matches on (file, entity_type, text).
+/// - `scope: "line"` matches on (path, line_num, entity_type, text).
+/// - `scope: "file"` matches on (path, entity_type, text).
 /// - `scope: "global"` matches on (entity_type, text).
 /// - Missing `text` is treated as "any text" (so you can ignore
 ///   all findings of a given type in a file).
+///
+/// `path` supports shell-style glob syntax: `*`, `?`, `[...]`, and `**`
+/// for recursive directory match. Examples:
+/// ```toml
+/// path = "docs/generated/**"     # recursive under docs/generated
+/// path = "src/**/*_test.py"      # any test file under src
+/// path = "vendor/bundle.js"      # exact match (no glob chars)
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IgnoreEntry {
     // Field order here is the TOML serialization order. We put the "what
     // kind of entry is this?" fields first (type for whole-file skips;
-    // entity_type for regular), then narrowing scope/file/line, then the
+    // entity_type for regular), then narrowing scope/path/line, then the
     // matcher (text / pattern). Makes each [[ignored]] block's first
     // visible line tell you what it's about.
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
@@ -28,8 +36,15 @@ pub struct IgnoreEntry {
     pub entity_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    /// File path or glob pattern. `file` is accepted as an alias for
+    /// backward compatibility with ignorelists written before 0.5.21;
+    /// `save()` always writes `path`.
+    #[serde(
+        default,
+        alias = "file",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,8 +98,65 @@ pub struct Ignorelist {
     entries: Vec<IgnoreEntry>,
     /// Parallel to `entries`: compiled regex for entries with `pattern` set.
     compiled_patterns: Vec<Option<Regex>>,
-    whole_file_skips: HashSet<String>,
+    /// Parallel to `entries`: compiled glob for the `path` field when it
+    /// contains glob metachars. None = literal string compare.
+    compiled_paths: Vec<Option<glob::Pattern>>,
+    /// Fast-path for whole-file skips: exact literal paths.
+    whole_file_skips_literal: HashSet<String>,
+    /// Whole-file skip globs. Checked after `whole_file_skips_literal`.
+    whole_file_skips_glob: Vec<glob::Pattern>,
     disabled_entities: HashSet<String>,
+}
+
+/// Effective scope for an entry, derived from what fields are set.
+/// Inference rules (evaluated in order):
+/// 1. `line` present → line
+/// 2. `path` present → file
+/// 3. neither       → global
+///
+/// An explicit `scope = "…"` on the entry overrides the inference; on save
+/// we strip the field when it matches what inference would have picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Global,
+    File,
+    Line,
+}
+
+fn infer_scope(e: &IgnoreEntry) -> Scope {
+    if e.line.is_some() {
+        Scope::Line
+    } else if e.path.is_some() {
+        Scope::File
+    } else {
+        Scope::Global
+    }
+}
+
+fn effective_scope(e: &IgnoreEntry) -> Scope {
+    match e.scope.as_deref() {
+        Some("line") => Scope::Line,
+        Some("file") => Scope::File,
+        Some("global") => Scope::Global,
+        _ => infer_scope(e),
+    }
+}
+
+/// Compile `p` as a glob iff it contains glob metachars; otherwise None
+/// (we'll fall back to literal string compare, which is cheaper).
+fn compile_path(p: &str) -> Option<glob::Pattern> {
+    if p.chars().any(|c| matches!(c, '*' | '?' | '[')) {
+        glob::Pattern::new(p).ok()
+    } else {
+        None
+    }
+}
+
+fn path_matches(entry_path: &str, compiled: Option<&glob::Pattern>, target: &str) -> bool {
+    match compiled {
+        Some(g) => g.matches(target),
+        None => entry_path == target,
+    }
 }
 
 impl Ignorelist {
@@ -107,9 +179,15 @@ impl Ignorelist {
         };
         let mut out = Self::default();
         for e in file.ignored {
+            let path_glob = e.path.as_deref().and_then(compile_path);
             if e.kind.as_deref() == Some("file") {
-                if let Some(f) = &e.file {
-                    out.whole_file_skips.insert(f.clone());
+                if let Some(p) = &e.path {
+                    match &path_glob {
+                        Some(g) => out.whole_file_skips_glob.push(g.clone()),
+                        None => {
+                            out.whole_file_skips_literal.insert(p.clone());
+                        }
+                    }
                 }
             }
             let compiled = e.pattern.as_ref().and_then(|p| match Regex::new(p) {
@@ -125,6 +203,7 @@ impl Ignorelist {
             });
             out.entries.push(e);
             out.compiled_patterns.push(compiled);
+            out.compiled_paths.push(path_glob);
         }
         out.disabled_entities = file
             .entities
@@ -140,15 +219,21 @@ impl Ignorelist {
     }
 
     pub fn is_file_skipped(&self, file: &str) -> bool {
-        self.whole_file_skips.contains(file)
+        if self.whole_file_skips_literal.contains(file) {
+            return true;
+        }
+        self.whole_file_skips_glob.iter().any(|g| g.matches(file))
     }
 
     pub fn is_ignored(&self, f: &Finding) -> bool {
-        for (entry, compiled) in self.entries.iter().zip(self.compiled_patterns.iter()) {
+        for ((entry, pat), path_glob) in self
+            .entries
+            .iter()
+            .zip(self.compiled_patterns.iter())
+            .zip(self.compiled_paths.iter())
+        {
             if entry.kind.as_deref() == Some("file") {
-                if entry.file.as_deref() == Some(f.file.as_str()) {
-                    return true;
-                }
+                // Handled via `is_file_skipped`; don't double-match.
                 continue;
             }
             if let Some(et) = &entry.entity_type {
@@ -156,46 +241,73 @@ impl Ignorelist {
                     continue;
                 }
             }
-            if !matches_criteria(entry, compiled.as_ref(), f) {
+            if !matches_criteria(entry, pat.as_ref(), f) {
                 continue;
             }
-            match entry.scope.as_deref() {
-                Some("line") => {
-                    if entry.file.as_deref() == Some(f.file.as_str())
+            let file_ok = || match entry.path.as_deref() {
+                Some(p) => path_matches(p, path_glob.as_ref(), &f.file),
+                None => false,
+            };
+            match effective_scope(entry) {
+                Scope::Line => {
+                    if file_ok()
                         && entry.line.as_deref() == Some(f.line_num.to_string().as_str())
                     {
                         return true;
                     }
                 }
-                Some("file") => {
-                    if entry.file.as_deref() == Some(f.file.as_str()) {
+                Scope::File => {
+                    if file_ok() {
                         return true;
                     }
                 }
-                Some("global") => {
-                    return true;
-                }
-                _ => {}
+                Scope::Global => return true,
             }
         }
         false
     }
 
     pub fn append(&mut self, entry: IgnoreEntry) {
+        let path_glob = entry.path.as_deref().and_then(compile_path);
         if entry.kind.as_deref() == Some("file") {
-            if let Some(file) = &entry.file {
-                self.whole_file_skips.insert(file.clone());
+            if let Some(p) = &entry.path {
+                match &path_glob {
+                    Some(g) => self.whole_file_skips_glob.push(g.clone()),
+                    None => {
+                        self.whole_file_skips_literal.insert(p.clone());
+                    }
+                }
             }
         }
         let compiled = entry.pattern.as_ref().and_then(|p| Regex::new(p).ok());
         self.entries.push(entry);
         self.compiled_patterns.push(compiled);
+        self.compiled_paths.push(path_glob);
     }
 
     #[allow(dead_code)]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let mut ignored = self.entries.clone();
+        // Drop redundant explicit `scope` — inference will recover it on load.
+        // Keeps saved files minimal (one less field per entry).
+        for e in ignored.iter_mut() {
+            if e.scope.is_some() {
+                let explicit = effective_scope(e);
+                e.scope = None;
+                if infer_scope(e) != explicit {
+                    // Inference would disagree; restore the explicit field.
+                    e.scope = Some(
+                        match explicit {
+                            Scope::Line => "line",
+                            Scope::File => "file",
+                            Scope::Global => "global",
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+        }
         ignored.sort_by_key(sort_key);
         let file = IgnorelistFile {
             ignored,
@@ -260,26 +372,24 @@ fn extract_header_field(block: &str, field: &str) -> Option<String> {
 /// Deterministic sort key for `[[ignored]]` entries.
 ///
 /// Order (low first): whole-file skips → entity_type → scope (global < file < line)
-/// → file → text/pattern. Entries with no entity_type or no scope go after
-/// those that have them because `Option::None` compares less than `Some(...)`
-/// — we invert that for tier so whole-file skips come FIRST.
+/// → path → text/pattern. Entries with no entity_type go after those that
+/// have them. Scope here is the effective (possibly-inferred) scope.
 fn sort_key(e: &IgnoreEntry) -> (u8, String, u8, String, String) {
     let is_whole_file = e.kind.as_deref() == Some("file");
     let tier = if is_whole_file { 0 } else { 1 };
     let entity = e.entity_type.clone().unwrap_or_default();
-    let scope_rank = match e.scope.as_deref() {
-        Some("global") => 0,
-        Some("file") => 1,
-        Some("line") => 2,
-        _ => 3,
+    let scope_rank = match effective_scope(e) {
+        Scope::Global => 0,
+        Scope::File => 1,
+        Scope::Line => 2,
     };
-    let file = e.file.clone().unwrap_or_default();
+    let path = e.path.clone().unwrap_or_default();
     let text = e
         .pattern
         .clone()
         .or_else(|| e.text.clone())
         .unwrap_or_default();
-    (tier, entity, scope_rank, file, text)
+    (tier, entity, scope_rank, path, text)
 }
 
 /// Return `true` if this ignore entry's match criteria apply to the finding.
@@ -423,7 +533,7 @@ mod tests {
         let entry = IgnoreEntry {
             entity_type: Some("URL".into()),
             scope: Some("file".into()),
-            file: Some("docs/a.md".into()),
+            path: Some("docs/a.md".into()),
             text: Some("https://example.com".into()),
             ..Default::default()
         };
@@ -437,7 +547,7 @@ mod tests {
         let entry = IgnoreEntry {
             entity_type: Some("URL".into()),
             scope: Some("line".into()),
-            file: Some("x".into()),
+            path: Some("x".into()),
             line: Some("42".into()),
             text: Some("https://example.com".into()),
             ..Default::default()
@@ -451,7 +561,7 @@ mod tests {
     fn whole_file_skip_ignores_path_entirely() {
         let entry = IgnoreEntry {
             kind: Some("file".into()),
-            file: Some("vendor/bundle.js".into()),
+            path: Some("vendor/bundle.js".into()),
             ..Default::default()
         };
         let list = with_entries(vec![entry]);
@@ -460,12 +570,102 @@ mod tests {
     }
 
     #[test]
+    fn path_supports_glob_syntax() {
+        let entry = IgnoreEntry {
+            entity_type: Some("IP_ADDRESS".into()),
+            path: Some("documentation/**".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "IP_ADDRESS",
+            "1.2.3.4",
+            "documentation/api/foo.md",
+            1,
+        )));
+        assert!(list.is_ignored(&mk_finding(
+            "IP_ADDRESS",
+            "1.2.3.4",
+            "documentation/bar.md",
+            1,
+        )));
+        assert!(!list.is_ignored(&mk_finding("IP_ADDRESS", "1.2.3.4", "src/app.py", 1)));
+    }
+
+    #[test]
+    fn whole_file_skip_supports_glob() {
+        let entry = IgnoreEntry {
+            kind: Some("file".into()),
+            path: Some("vendor/**".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_file_skipped("vendor/bundle.js"));
+        assert!(list.is_file_skipped("vendor/sub/thing.min.js"));
+        assert!(!list.is_file_skipped("src/app.py"));
+    }
+
+    #[test]
+    fn scope_inferred_from_path_and_line() {
+        // path alone → file scope
+        let e_file = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            path: Some("a.py".into()),
+            text: Some("https://x".into()),
+            ..Default::default()
+        };
+        // path + line → line scope
+        let e_line = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            path: Some("a.py".into()),
+            line: Some("3".into()),
+            text: Some("https://x".into()),
+            ..Default::default()
+        };
+        // neither → global scope
+        let e_global = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            text: Some("https://x".into()),
+            ..Default::default()
+        };
+
+        let file_list = with_entries(vec![e_file]);
+        assert!(file_list.is_ignored(&mk_finding("URL", "https://x", "a.py", 1)));
+        assert!(!file_list.is_ignored(&mk_finding("URL", "https://x", "b.py", 1)));
+
+        let line_list = with_entries(vec![e_line]);
+        assert!(line_list.is_ignored(&mk_finding("URL", "https://x", "a.py", 3)));
+        assert!(!line_list.is_ignored(&mk_finding("URL", "https://x", "a.py", 4)));
+
+        let global_list = with_entries(vec![e_global]);
+        assert!(global_list.is_ignored(&mk_finding("URL", "https://x", "any.py", 99)));
+    }
+
+    #[test]
+    fn file_field_is_accepted_as_alias_for_path() {
+        // Backward compat: old ignorelists that wrote `file = "..."` still load.
+        let text = r#"
+[[ignored]]
+entity_type = "URL"
+file = "legacy/thing.md"
+text = "https://x"
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let list = Ignorelist::load_or_empty(&path).unwrap();
+        assert!(list.is_ignored(&mk_finding("URL", "https://x", "legacy/thing.md", 1)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn missing_text_matches_any() {
         // `text` omitted means "ignore all findings of this entity in this file".
         let entry = IgnoreEntry {
             entity_type: Some("URL".into()),
             scope: Some("file".into()),
-            file: Some("x".into()),
+            path: Some("x".into()),
             ..Default::default()
         };
         let list = with_entries(vec![entry]);
@@ -495,7 +695,7 @@ MAC_ADDRESS = true
     fn sort_key_puts_whole_file_skips_first() {
         let whole = IgnoreEntry {
             kind: Some("file".into()),
-            file: Some("a".into()),
+            path: Some("a".into()),
             ..Default::default()
         };
         let regular = IgnoreEntry {
@@ -520,14 +720,14 @@ MAC_ADDRESS = true
         let url_file = IgnoreEntry {
             entity_type: Some("URL".into()),
             scope: Some("file".into()),
-            file: Some("f".into()),
+            path: Some("f".into()),
             text: Some("b".into()),
             ..Default::default()
         };
         let email_line = IgnoreEntry {
             entity_type: Some("EMAIL_ADDRESS".into()),
             scope: Some("line".into()),
-            file: Some("f".into()),
+            path: Some("f".into()),
             line: Some("1".into()),
             text: Some("c".into()),
             ..Default::default()
