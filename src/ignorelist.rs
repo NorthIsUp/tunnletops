@@ -39,15 +39,20 @@ pub struct IgnorelistFile {
     pub entities: EntitiesConfig,
 }
 
-/// `[entities]` section. All entity types are enabled by default;
-/// `disabled` turns specific types off, and takes precedence over `enabled`.
+/// `[entities]` section — a flat `NAME = true|false` map. Entity types
+/// default to enabled; set to `false` to skip them entirely. Example:
+///
+/// ```toml
+/// [entities]
+/// URL = false
+/// MAC_ADDRESS = false
+/// ```
+///
+/// Case-sensitive — match the emitted `entity_type` exactly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct EntitiesConfig {
-    /// Entity types to skip entirely (recognizer doesn't run, NER findings
-    /// of this type are dropped). Case-sensitive — match the emitted
-    /// `entity_type` exactly, e.g. `"URL"`, `"MAC_ADDRESS"`.
-    #[serde(default)]
-    pub disabled: Vec<String>,
+    pub flags: std::collections::HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,7 +81,12 @@ impl Ignorelist {
             }
             out.entries.push(e);
         }
-        out.disabled_entities = file.entities.disabled.into_iter().collect();
+        out.disabled_entities = file
+            .entities
+            .flags
+            .into_iter()
+            .filter_map(|(k, enabled)| if !enabled { Some(k) } else { None })
+            .collect();
         Ok(out)
     }
 
@@ -141,7 +151,11 @@ impl Ignorelist {
         let file = IgnorelistFile {
             ignored: self.entries.clone(),
             entities: EntitiesConfig {
-                disabled: self.disabled_entities.iter().cloned().collect(),
+                flags: self
+                    .disabled_entities
+                    .iter()
+                    .map(|k| (k.clone(), false))
+                    .collect(),
             },
         };
         let text = toml::to_string_pretty(&file).context("serializing ignorelist")?;

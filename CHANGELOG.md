@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-16
+
+### Changed
+
+- **Breaking (for the day-old `[entities]` section):** switched from
+  `disabled = ["URL"]` to a flat `NAME = true|false` map. Reads nicer
+  and leaves room to grow per-entity config later:
+  ```toml
+  [entities]
+  URL = false
+  MAC_ADDRESS = false
+  ```
+  Missing entries default to enabled. `true` is the same as not listing
+  the entity at all.
+
 ## [0.5.1] - 2026-04-16
 
 ### Added
