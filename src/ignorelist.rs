@@ -95,8 +95,16 @@ impl Ignorelist {
         }
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let file: IgnorelistFile =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+
+        // Legacy YAML fallback: if the file extension is .yaml/.yml, reuse the
+        // phi.yaml parser from the migrate module so users don't have to
+        // convert before they can scan. The [entities] section isn't
+        // expressible in legacy phi.yaml, but ignore rules come through.
+        let file: IgnorelistFile = match path.extension().and_then(|e| e.to_str()) {
+            Some("yaml") | Some("yml") => crate::migrate::load_legacy_yaml(&text)
+                .with_context(|| format!("parsing legacy YAML {}", path.display()))?,
+            _ => toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+        };
         let mut out = Self::default();
         for e in file.ignored {
             if e.kind.as_deref() == Some("file") {

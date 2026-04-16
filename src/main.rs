@@ -7,7 +7,7 @@ mod pool;
 mod recognizer;
 mod walker;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -24,6 +24,27 @@ use crate::walker::discover_files;
 use std::collections::HashSet;
 
 const DEFAULT_IGNORELIST: &str = ".baselines/phi.toml";
+const LEGACY_IGNORELIST: &str = ".baselines/phi.yaml";
+
+/// Pick the ignorelist path:
+/// 1. `--baselines PATH` if provided (explicit override)
+/// 2. `.baselines/phi.toml` in cwd
+/// 3. `.baselines/phi.yaml` in cwd (legacy, read-only fallback)
+/// Returns the path even if nothing exists — `load_or_empty` handles that.
+fn resolve_ignorelist_path(cli_override: Option<&Path>) -> PathBuf {
+    if let Some(p) = cli_override {
+        return p.to_path_buf();
+    }
+    let toml = PathBuf::from(DEFAULT_IGNORELIST);
+    if toml.exists() {
+        return toml;
+    }
+    let yaml = PathBuf::from(LEGACY_IGNORELIST);
+    if yaml.exists() {
+        return yaml;
+    }
+    toml
+}
 
 #[derive(Parser)]
 #[command(name = "tunnletops", version, about = "Fast PHI/PII scanner")]
@@ -65,6 +86,11 @@ struct Cli {
     /// dropped. E.g. `--entities EMAIL_ADDRESS,CREDIT_CARD,US_SSN`.
     #[arg(long, value_delimiter = ',')]
     entities: Vec<String>,
+
+    /// Path to the ignorelist (`.baselines/phi.toml` by default, with
+    /// `phi.yaml` as a read-only legacy fallback).
+    #[arg(long)]
+    baselines: Option<PathBuf>,
 
     /// Verbose: stream every candidate (strict/broad regex and NER) to stderr,
     /// including candidates that were filtered out. Useful for tuning hybrid
@@ -122,7 +148,9 @@ fn main() -> Result<()> {
         None => {}
     }
 
-    let ignorelist = Ignorelist::load_or_empty(DEFAULT_IGNORELIST)?;
+    let ignorelist_path = resolve_ignorelist_path(cli.baselines.as_deref());
+    tracing::debug!("ignorelist: {}", ignorelist_path.display());
+    let ignorelist = Ignorelist::load_or_empty(&ignorelist_path)?;
     let recognizers = RecognizerSet::default_set();
     let ner = NerEngine::load(cli.model.ner_kind(), cli.threshold).context("loading NER model")?;
 
@@ -150,7 +178,13 @@ fn main() -> Result<()> {
     formatter.emit_summary(&all_findings)?;
 
     if cli.fix_accept_all {
-        output::fix_accept_all(&all_findings, DEFAULT_IGNORELIST)?;
+        // When saving via --fix-accept-all, always write a `.toml` file even
+        // if we read a legacy `.yaml`. This is the friendly upgrade path.
+        let write_path = ignorelist_path.with_file_name("phi.toml");
+        output::fix_accept_all(
+            &all_findings,
+            write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
+        )?;
     } else if cli.fix {
         // TODO: interactive TUI fix mode (after core).
         eprintln!("--fix mode not yet implemented; use --fix-accept-all for now");

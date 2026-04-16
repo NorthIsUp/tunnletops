@@ -31,12 +31,11 @@ struct LegacyEntry {
     text: Option<String>,
 }
 
-pub fn migrate(input: &Path, output: &Path) -> Result<()> {
-    let yaml_text =
-        fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
-    let legacy: LegacyFile =
-        serde_yaml::from_str(&yaml_text).with_context(|| format!("parsing {}", input.display()))?;
-
+/// Parse a legacy `phi.yaml` into the in-memory `IgnorelistFile`.
+/// Used by both the `migrate` subcommand and the YAML fallback in
+/// `Ignorelist::load_or_empty`.
+pub fn load_legacy_yaml(yaml_text: &str) -> Result<IgnorelistFile> {
+    let legacy: LegacyFile = serde_yaml::from_str(yaml_text).context("parsing legacy YAML")?;
     // phi-scan's `_is_ignored` falls back to the arbitrary top-level YAML key
     // when a `type: file` entry has no explicit `file:` field. Preserve that.
     let mut entries: Vec<IgnoreEntry> = Vec::with_capacity(legacy.ignored.len());
@@ -62,11 +61,17 @@ pub fn migrate(input: &Path, output: &Path) -> Result<()> {
             pattern: None,
         });
     }
-
-    let toml_file = IgnorelistFile {
+    Ok(IgnorelistFile {
         ignored: entries,
         entities: Default::default(),
-    };
+    })
+}
+
+pub fn migrate(input: &Path, output: &Path) -> Result<()> {
+    let yaml_text =
+        fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+    let toml_file =
+        load_legacy_yaml(&yaml_text).with_context(|| format!("parsing {}", input.display()))?;
     let toml_text = toml::to_string_pretty(&toml_file).context("serializing tunnletops TOML")?;
 
     if let Some(parent) = output.parent() {

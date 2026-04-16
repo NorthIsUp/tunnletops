@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-04-16
+
+### Added
+
+- `--baselines PATH` flag to explicitly point at an ignorelist. Useful
+  when running tunnletops from a different working tree than the one
+  that owns `.baselines/phi.toml` (e.g. running from the main repo
+  while your `phi.toml` lives in a worktree).
+- Legacy `phi.yaml` read-only fallback: if `.baselines/phi.toml`
+  doesn't exist but `.baselines/phi.yaml` does, tunnletops reads the
+  YAML. Ignore rules come through; `[entities]` section isn't
+  expressible in legacy YAML so entity-disable doesn't apply.
+  `--fix-accept-all` always writes TOML (friendly upgrade path).
+
+### Resolution order
+
+1. `--baselines PATH` (explicit)
+2. `.baselines/phi.toml` in cwd
+3. `.baselines/phi.yaml` in cwd (legacy, read-only)
+
 ## [0.5.8] - 2026-04-16
 
 ### Changed
