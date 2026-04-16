@@ -55,6 +55,17 @@ struct Cli {
     #[arg(long = "only-issues")]
     only_issues: bool,
 
+    /// Minimum confidence threshold for NER findings (0.0 - 1.0).
+    /// Only applies to `--model bert` / `--model gliner` and their hybrids.
+    /// Default is backend-specific (0.5 for GLiNER).
+    #[arg(long)]
+    threshold: Option<f32>,
+
+    /// Comma-separated list of entity types to emit; everything else is
+    /// dropped. E.g. `--entities EMAIL_ADDRESS,CREDIT_CARD,US_SSN`.
+    #[arg(long, value_delimiter = ',')]
+    entities: Vec<String>,
+
     /// Verbose: stream every candidate (strict/broad regex and NER) to stderr,
     /// including candidates that were filtered out. Useful for tuning hybrid
     /// modes and diagnosing misses.
@@ -97,13 +108,26 @@ fn main() -> Result<()> {
 
     let ignorelist = Ignorelist::load_or_empty(DEFAULT_IGNORELIST)?;
     let recognizers = RecognizerSet::default_set();
-    let ner = NerEngine::load(cli.model.ner_kind()).context("loading NER model")?;
+    let ner = NerEngine::load(cli.model.ner_kind(), cli.threshold).context("loading NER model")?;
+
+    let entity_filter: Option<std::collections::HashSet<String>> = if cli.entities.is_empty() {
+        None
+    } else {
+        Some(cli.entities.iter().cloned().collect())
+    };
 
     let paths = discover_files(&cli.paths, cli.pr)?;
     tracing::debug!("discovery: {} files", paths.len());
 
-    let (results, receiver) =
-        start_pipeline(paths, recognizers, ner, ignorelist, cli.model, cli.verbose);
+    let (results, receiver) = start_pipeline(
+        paths,
+        recognizers,
+        ner,
+        ignorelist,
+        cli.model,
+        cli.verbose,
+        entity_filter,
+    );
     let formatter = Formatter::new(cli.format, cli.only_issues);
     let all_findings = stream_and_collect(receiver, &formatter)?;
 
@@ -148,15 +172,25 @@ fn start_pipeline(
     ignorelist: Ignorelist,
     model: Model,
     verbose: bool,
+    entity_filter: Option<std::collections::HashSet<String>>,
 ) -> (Pipeline, Receiver<FileOutcome>) {
     let (tx, rx) = bounded::<FileOutcome>(64);
     let recognizers = Arc::new(recognizers);
     let ner = Arc::new(ner);
     let ignorelist = Arc::new(ignorelist);
+    let entity_filter = Arc::new(entity_filter);
 
     let handle = std::thread::spawn(move || {
         paths.par_iter().for_each_with(tx, |tx, path| {
-            let outcome = scan_one_file(path, &recognizers, &ner, &ignorelist, model, verbose);
+            let outcome = scan_one_file(
+                path,
+                &recognizers,
+                &ner,
+                &ignorelist,
+                model,
+                verbose,
+                entity_filter.as_ref().as_ref(),
+            );
             let _ = tx.send(outcome);
         });
     });
@@ -171,6 +205,7 @@ fn scan_one_file(
     ignorelist: &Ignorelist,
     model: Model,
     verbose: bool,
+    entity_filter: Option<&std::collections::HashSet<String>>,
 ) -> FileOutcome {
     let file_str = path.to_string_lossy().into_owned();
 
@@ -297,6 +332,20 @@ fn scan_one_file(
             })
             .collect();
         dedupe_findings(merge_findings(strict, Vec::new(), ner_findings))
+    };
+
+    // Apply --entities filter last: user-requested subset, case-insensitive.
+    let findings: Vec<Finding> = if let Some(filter) = entity_filter {
+        findings
+            .into_iter()
+            .filter(|f| {
+                filter
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(&f.entity_type))
+            })
+            .collect()
+    } else {
+        findings
     };
 
     FileOutcome::scanned(file_str, findings)

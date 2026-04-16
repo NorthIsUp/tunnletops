@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-16
+
+### Added
+
+- Seven new strict recognizers ported from Microsoft Presidio's
+  `predefined_recognizers/generic` at commit 06616b33d:
+  - `IpV4Recognizer` with octet range validation (rejects `999.999.999.999`)
+  - `IpV6Recognizer` covering `::` shorthand, IPv4-mapped (`::ffff:1.2.3.4`),
+    and IPv4-embedded variants
+  - `UrlRecognizer` (both `http(s)://` and bare-domain forms)
+  - `MacRecognizer` (colon/hyphen + Cisco-dot formats)
+  - `IbanRecognizer` with ISO 13616 mod-97 checksum validation
+  - `CryptoRecognizer` with Base58Check validation for legacy BTC addresses
+  - `PhoneRecognizer` using the `phonenumber` crate (port of Google's
+    `libphonenumber`) — regex finds candidates, library validates country
+    codes, area codes, and length rules. Replaces the old regex-only broad
+    recognizer.
+- `US_SSN` promoted from broad to strict: Presidio's validated regex rejects
+  `000/666/9xx` area numbers.
+- `--threshold N.N` flag — override the NER confidence threshold (GLiNER
+  default 0.5). Only affects `--model gliner` / `--model regex+gliner`.
+- `--entities TYPE1,TYPE2,...` flag — filter output to a subset of entity
+  types, case-insensitive. Example:
+  `--entities EMAIL_ADDRESS,CREDIT_CARD,US_SSN`.
+- BILOU (B-/I-/U-/L-) prefix support in the BERT BIO decoder — previously
+  only B-/I-. Matches Presidio's HuggingFaceNerRecognizer behavior.
+
+### Changed
+
+- `EmailRecognizer` upgraded to Presidio's RFC-closer pattern (accepts
+  `+`, `'`, `~`, etc. in the local part).
+- `CreditCardRecognizer` tightened to brand-prefix shapes (Visa, MC, Amex,
+  Diners, Discover) instead of any 13-19 digit run.
+- Only `US_DRIVER_LICENSE` and `US_PASSPORT` remain broad (hybrid-only).
+  All other entity types are validated by their own checksum / parser and
+  emitted directly in `--model regex`.
+
+### Notes
+
+- `URL` findings tend to dominate output on doc-heavy repos. Filter with
+  `--entities` or add `[[ignored]]` rules for known internal domains.
+- The `phonenumber` crate ships with metadata for 200+ regions. Default
+  matching regions: US, GB, DE, FR, IL, IN, CA, BR.
+
 ## [0.4.0] - 2026-04-15
 
 ### Added

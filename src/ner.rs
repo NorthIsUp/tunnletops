@@ -87,7 +87,7 @@ enum Backend {
 }
 
 impl NerEngine {
-    pub fn load(kind: Option<NerKind>) -> Result<Self> {
+    pub fn load(kind: Option<NerKind>, threshold: Option<f32>) -> Result<Self> {
         match kind {
             None => {
                 tracing::debug!("NER backend: regex (disabled)");
@@ -104,7 +104,8 @@ impl NerEngine {
             }
             Some(NerKind::Gliner) => {
                 tracing::debug!("NER backend: gliner");
-                let gliner = GlinerBackend::load().context("loading GLiNER backend")?;
+                let gliner = GlinerBackend::load(threshold.unwrap_or(GLINER_THRESHOLD))
+                    .context("loading GLiNER backend")?;
                 Ok(Self {
                     backend: Backend::Gliner(Box::new(gliner)),
                 })
@@ -377,22 +378,53 @@ fn decode_bio_row(
         }
         let label = LABEL_TABLE.get(best_class).copied().unwrap_or("O");
 
-        if let Some(stripped) = label.strip_prefix("B-") {
-            flush(&mut current, &mut findings);
-            current = Some((t, t, stripped));
-        } else if let Some(stripped) = label.strip_prefix("I-") {
-            if let Some((start, _, ent)) = &current {
-                if *ent == stripped {
-                    current = Some((*start, t, ent));
-                } else {
-                    flush(&mut current, &mut findings);
-                    current = Some((t, t, stripped));
-                }
-            } else {
-                current = Some((t, t, stripped));
+        // BILOU scheme: B-X begin, I-X inside, L-X last, U-X unit (single-token).
+        // Presidio's HuggingFaceNerRecognizer strips all four prefixes.
+        let prefixes = ["B-", "I-", "L-", "U-"];
+        let stripped = prefixes
+            .iter()
+            .find_map(|p| label.strip_prefix(p).map(|rest| (*p, rest)));
+        match stripped {
+            Some(("U-", rest)) => {
+                // Unit: flush current, emit this single-token span, reset.
+                flush(&mut current, &mut findings);
+                current = Some((t, t, rest));
+                flush(&mut current, &mut findings);
             }
-        } else {
-            flush(&mut current, &mut findings);
+            Some(("L-", rest)) => {
+                // Last: extend current if same type, otherwise start-and-end.
+                if let Some((start, _, ent)) = &current {
+                    if *ent == rest {
+                        current = Some((*start, t, ent));
+                    } else {
+                        flush(&mut current, &mut findings);
+                        current = Some((t, t, rest));
+                    }
+                } else {
+                    current = Some((t, t, rest));
+                }
+                flush(&mut current, &mut findings);
+            }
+            Some(("B-", rest)) => {
+                flush(&mut current, &mut findings);
+                current = Some((t, t, rest));
+            }
+            Some(("I-", rest)) => {
+                if let Some((start, _, ent)) = &current {
+                    if *ent == rest {
+                        current = Some((*start, t, ent));
+                    } else {
+                        flush(&mut current, &mut findings);
+                        current = Some((t, t, rest));
+                    }
+                } else {
+                    current = Some((t, t, rest));
+                }
+            }
+            _ => {
+                // "O" or anything else — flush.
+                flush(&mut current, &mut findings);
+            }
         }
     }
     flush(&mut current, &mut findings);
@@ -468,7 +500,7 @@ pub struct GlinerBackend {
 }
 
 impl GlinerBackend {
-    fn load() -> Result<Self> {
+    fn load(threshold: f32) -> Result<Self> {
         use gliner::model::params::Parameters;
         use gliner::model::pipeline::span::SpanMode;
         use gliner::model::GLiNER;
@@ -499,7 +531,7 @@ impl GlinerBackend {
         let mp = model_path.clone();
         let tp = tokenizer_path.clone();
         let models = Pool::new(n, move || {
-            let params = Parameters::default().with_threshold(GLINER_THRESHOLD);
+            let params = Parameters::default().with_threshold(threshold);
             let runtime = RuntimeParameters::default();
             GLiNER::<SpanMode>::new(
                 params,
