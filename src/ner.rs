@@ -16,12 +16,21 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use crate::finding::Finding;
+use crate::pool::Pool;
+
+/// How many parallel sessions to build for each NER backend.
+/// Capped at 4 to keep memory in check — one BERT session is ~200MB and one
+/// GLiNER session is ~400MB resident.
+fn pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2)
+}
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Model {
@@ -147,14 +156,14 @@ const LABEL_TABLE: &[&str] = &[
     "O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC",
 ];
 
+/// How many lines we pack into one BERT forward pass. Bigger = fewer ort
+/// calls = less per-call overhead, but more padded tokens on short lines.
+const BERT_BATCH_SIZE: usize = 32;
+
 pub struct BertBackend {
-    session: Mutex<ort::session::Session>,
+    sessions: Pool<ort::session::Session>,
     tokenizer: tokenizers::Tokenizer,
 }
-
-// tokenizers::Tokenizer is Send but not Sync; we wrap session in Mutex.
-// Both Mutex fields make BertBackend Send+Sync.
-unsafe impl Sync for BertBackend {}
 
 impl BertBackend {
     fn load() -> Result<Self> {
@@ -176,17 +185,25 @@ impl BertBackend {
             "BERT NER tokenizer",
         )?;
 
-        let session = ort::session::Session::builder()
-            .context("creating ort session builder")?
-            .commit_from_file(&model_path)
-            .with_context(|| format!("loading ONNX model from {}", model_path.display()))?;
+        let n = pool_size();
+        let model_path_clone = model_path.clone();
+        let sessions = Pool::new(n, move || {
+            ort::session::Session::builder()
+                .context("creating ort session builder")?
+                .commit_from_file(&model_path_clone)
+                .with_context(|| format!("loading ONNX model from {}", model_path_clone.display()))
+        })?;
 
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
 
-        tracing::debug!("BERT NER loaded: model={}", model_path.display());
+        tracing::debug!(
+            "BERT NER loaded: model={} pool_size={}",
+            model_path.display(),
+            n
+        );
         Ok(Self {
-            session: Mutex::new(session),
+            sessions,
             tokenizer,
         })
     }
@@ -197,69 +214,92 @@ impl BertBackend {
         text: &str,
         line_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<Finding> {
-        let mut all = Vec::new();
         let lines: Vec<&str> = text.lines().collect();
 
-        for (line_idx, line) in lines.iter().enumerate() {
-            let line_num = (line_idx + 1) as u32;
-            if let Some(filter) = line_filter {
-                if !filter.contains(&line_num) {
-                    continue;
+        // Collect lines to process. We keep the original line index and line content
+        // alongside the trimmed text that goes to the tokenizer.
+        let inputs: Vec<(u32, &str, &str)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let line_num = (i + 1) as u32;
+                if let Some(filter) = line_filter {
+                    if !filter.contains(&line_num) {
+                        return None;
+                    }
                 }
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.len() < 3 {
-                continue;
-            }
-            match self.analyze_line(file, line_num, line, trimmed) {
-                Ok(findings) => all.extend(findings),
-                Err(e) => {
-                    tracing::debug!("NER error on {}:{}: {e:#}", file, line_idx + 1);
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.len() < 3 {
+                    return None;
                 }
+                Some((line_num, *line, trimmed))
+            })
+            .collect();
+
+        let mut findings = Vec::new();
+        for chunk in inputs.chunks(BERT_BATCH_SIZE) {
+            match self.analyze_chunk(file, chunk) {
+                Ok(fs) => findings.extend(fs),
+                Err(e) => tracing::debug!("BERT chunk error in {file}: {e:#}"),
             }
         }
-        all
+        findings
     }
 
-    fn analyze_line(
-        &self,
-        file: &str,
-        line_num: u32,
-        line_content: &str,
-        trimmed: &str,
-    ) -> Result<Vec<Finding>> {
-        let encoding = self
+    fn analyze_chunk(&self, file: &str, chunk: &[(u32, &str, &str)]) -> Result<Vec<Finding>> {
+        let texts: Vec<&str> = chunk.iter().map(|(_, _, t)| *t).collect();
+        let encodings = self
             .tokenizer
-            .encode(trimmed, true)
-            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+            .encode_batch(texts, true)
+            .map_err(|e| anyhow::anyhow!("encode_batch: {e}"))?;
 
-        let ids = encoding.get_ids();
-        if ids.len() > MAX_TOKENS + 2 {
+        // Drop overlong rows (rare).
+        let kept: Vec<usize> = encodings
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.get_ids().len() <= MAX_TOKENS + 2)
+            .map(|(i, _)| i)
+            .collect();
+        if kept.is_empty() {
             return Ok(Vec::new());
         }
-        let mask = encoding.get_attention_mask();
-        let offsets = encoding.get_offsets();
 
-        let n = ids.len();
-        let input_ids: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
-        let attention_mask: Vec<i64> = mask.iter().map(|&x| x as i64).collect();
+        let max_len = kept
+            .iter()
+            .map(|&i| encodings[i].get_ids().len())
+            .max()
+            .unwrap();
+        let batch = kept.len();
+        let num_classes = LABEL_TABLE.len();
 
-        let input_ids_arr =
-            ndarray::Array2::from_shape_vec((1, n), input_ids).context("input_ids shape")?;
-        let attn_arr = ndarray::Array2::from_shape_vec((1, n), attention_mask)
-            .context("attention_mask shape")?;
-        let token_type_ids = vec![0i64; n];
-        let token_type_arr = ndarray::Array2::from_shape_vec((1, n), token_type_ids)
-            .context("token_type_ids shape")?;
+        // Pack padded tensors. PAD token id = 0 for BERT.
+        let mut input_ids = vec![0i64; batch * max_len];
+        let mut attn = vec![0i64; batch * max_len];
+        for (row, &i) in kept.iter().enumerate() {
+            let enc = &encodings[i];
+            let ids = enc.get_ids();
+            let mask = enc.get_attention_mask();
+            for (col, (&id, &m)) in ids.iter().zip(mask.iter()).enumerate() {
+                input_ids[row * max_len + col] = id as i64;
+                attn[row * max_len + col] = m as i64;
+            }
+        }
+        let ttype = vec![0i64; batch * max_len];
 
-        let ids_tensor =
-            ort::value::Tensor::<i64>::from_array(input_ids_arr).context("ids tensor")?;
+        let ids_arr =
+            ndarray::Array2::from_shape_vec((batch, max_len), input_ids).context("ids shape")?;
+        let attn_arr =
+            ndarray::Array2::from_shape_vec((batch, max_len), attn).context("attn shape")?;
+        let ttype_arr =
+            ndarray::Array2::from_shape_vec((batch, max_len), ttype).context("ttype shape")?;
+
+        let ids_tensor = ort::value::Tensor::<i64>::from_array(ids_arr).context("ids tensor")?;
         let attn_tensor = ort::value::Tensor::<i64>::from_array(attn_arr).context("attn tensor")?;
         let ttype_tensor =
-            ort::value::Tensor::<i64>::from_array(token_type_arr).context("token_type tensor")?;
+            ort::value::Tensor::<i64>::from_array(ttype_arr).context("ttype tensor")?;
 
-        let logits_owned: Vec<f32> = {
-            let session = self.session.lock().unwrap();
+        let logits: Vec<f32> = {
+            let session = self.sessions.checkout();
             let outputs = session
                 .run(ort::inputs![ids_tensor, attn_tensor, ttype_tensor]?)
                 .context("ort run")?;
@@ -268,90 +308,48 @@ impl BertBackend {
                 .context("extracting logits")?;
             view.iter().copied().collect()
         };
-        let logits_flat = &logits_owned;
-        // Output shape: [1, seq_len, num_classes]. We know both from input.
-        let seq_len = n;
-        let num_classes = LABEL_TABLE.len();
 
-        let indent = line_content.len() - line_content.trim_start().len();
+        // Decode each row with its actual (unpadded) length.
         let mut findings = Vec::new();
-        let mut current: Option<(usize, usize, &str)> = None; // (start_token, end_token, entity)
-
-        for t in 0..seq_len {
-            let mut best_class = 0usize;
-            let mut best_score = f32::NEG_INFINITY;
-            let row_offset = t * num_classes;
-            for c in 0..num_classes {
-                let s = logits_flat[row_offset + c];
-                if s > best_score {
-                    best_score = s;
-                    best_class = c;
-                }
-            }
-            let label = LABEL_TABLE.get(best_class).copied().unwrap_or("O");
-
-            if let Some(stripped) = label.strip_prefix("B-") {
-                if let Some((start, end, ent)) = current.take() {
-                    if let Some(f) = self.span_to_finding(
-                        file,
-                        line_num,
-                        line_content,
-                        trimmed,
-                        indent,
-                        offsets,
-                        start,
-                        end,
-                        ent,
-                    ) {
-                        findings.push(f);
-                    }
-                }
-                current = Some((t, t, stripped));
-            } else if let Some(stripped) = label.strip_prefix("I-") {
-                if let Some((start, end, ent)) = &current {
-                    if *ent == stripped {
-                        current = Some((*start, t, ent));
-                    } else {
-                        if let Some(f) = self.span_to_finding(
-                            file,
-                            line_num,
-                            line_content,
-                            trimmed,
-                            indent,
-                            offsets,
-                            *start,
-                            *end,
-                            ent,
-                        ) {
-                            findings.push(f);
-                        }
-                        current = Some((t, t, stripped));
-                    }
-                } else {
-                    current = Some((t, t, stripped));
-                }
-            } else {
-                // "O"
-                if let Some((start, end, ent)) = current.take() {
-                    if let Some(f) = self.span_to_finding(
-                        file,
-                        line_num,
-                        line_content,
-                        trimmed,
-                        indent,
-                        offsets,
-                        start,
-                        end,
-                        ent,
-                    ) {
-                        findings.push(f);
-                    }
-                }
-            }
+        for (row, &i) in kept.iter().enumerate() {
+            let (line_num, line_content, trimmed) = chunk[i];
+            let enc = &encodings[i];
+            let actual_len = enc.get_ids().len();
+            let row_start = row * max_len * num_classes;
+            let row_logits = &logits[row_start..row_start + actual_len * num_classes];
+            findings.extend(decode_bio_row(
+                file,
+                line_num,
+                line_content,
+                trimmed,
+                enc.get_offsets(),
+                row_logits,
+                actual_len,
+                num_classes,
+            ));
         }
-        // flush
+        Ok(findings)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_bio_row(
+    file: &str,
+    line_num: u32,
+    line_content: &str,
+    trimmed: &str,
+    offsets: &[(usize, usize)],
+    logits: &[f32],
+    seq_len: usize,
+    num_classes: usize,
+) -> Vec<Finding> {
+    let indent = line_content.len() - line_content.trim_start().len();
+    let mut findings = Vec::new();
+    let mut current: Option<(usize, usize, &str)> = None;
+
+    let flush = |current: &mut Option<(usize, usize, &str)>, out: &mut Vec<Finding>| {
         if let Some((start, end, ent)) = current.take() {
-            if let Some(f) = self.span_to_finding(
+            if let Some(f) = span_to_finding(
                 file,
                 line_num,
                 line_content,
@@ -362,49 +360,79 @@ impl BertBackend {
                 end,
                 ent,
             ) {
-                findings.push(f);
+                out.push(f);
             }
         }
+    };
 
-        Ok(findings)
-    }
+    for t in 0..seq_len {
+        let mut best_class = 0usize;
+        let mut best_score = f32::NEG_INFINITY;
+        for c in 0..num_classes {
+            let s = logits[t * num_classes + c];
+            if s > best_score {
+                best_score = s;
+                best_class = c;
+            }
+        }
+        let label = LABEL_TABLE.get(best_class).copied().unwrap_or("O");
 
-    #[allow(clippy::too_many_arguments)]
-    fn span_to_finding(
-        &self,
-        file: &str,
-        line_num: u32,
-        line_content: &str,
-        trimmed: &str,
-        indent: usize,
-        offsets: &[(usize, usize)],
-        start_tok: usize,
-        end_tok: usize,
-        bio_entity: &str,
-    ) -> Option<Finding> {
-        let entity_type = bio_to_entity(bio_entity)?;
-        let byte_start = offsets.get(start_tok)?.0;
-        let byte_end = offsets.get(end_tok)?.1;
-        if byte_start >= byte_end || byte_end > trimmed.len() {
-            return None;
+        if let Some(stripped) = label.strip_prefix("B-") {
+            flush(&mut current, &mut findings);
+            current = Some((t, t, stripped));
+        } else if let Some(stripped) = label.strip_prefix("I-") {
+            if let Some((start, _, ent)) = &current {
+                if *ent == stripped {
+                    current = Some((*start, t, ent));
+                } else {
+                    flush(&mut current, &mut findings);
+                    current = Some((t, t, stripped));
+                }
+            } else {
+                current = Some((t, t, stripped));
+            }
+        } else {
+            flush(&mut current, &mut findings);
         }
-        let text = trimmed[byte_start..byte_end].to_string();
-        if text.trim().is_empty() || text.len() < 2 {
-            return None;
-        }
-        let col_start = (indent + byte_start) as u32;
-        let col_end = (indent + byte_end) as u32;
-        Some(Finding {
-            file: file.to_string(),
-            line_num,
-            col_start,
-            col_end,
-            entity_type: entity_type.to_string(),
-            text,
-            score: 0.85,
-            line_content: line_content.to_string(),
-        })
     }
+    flush(&mut current, &mut findings);
+    findings
+}
+
+#[allow(clippy::too_many_arguments)]
+fn span_to_finding(
+    file: &str,
+    line_num: u32,
+    line_content: &str,
+    trimmed: &str,
+    indent: usize,
+    offsets: &[(usize, usize)],
+    start_tok: usize,
+    end_tok: usize,
+    bio_entity: &str,
+) -> Option<Finding> {
+    let entity_type = bio_to_entity(bio_entity)?;
+    let byte_start = offsets.get(start_tok)?.0;
+    let byte_end = offsets.get(end_tok)?.1;
+    if byte_start >= byte_end || byte_end > trimmed.len() {
+        return None;
+    }
+    let text = trimmed[byte_start..byte_end].to_string();
+    if text.trim().is_empty() || text.len() < 2 {
+        return None;
+    }
+    let col_start = (indent + byte_start) as u32;
+    let col_end = (indent + byte_end) as u32;
+    Some(Finding {
+        file: file.to_string(),
+        line_num,
+        col_start,
+        col_end,
+        entity_type: entity_type.to_string(),
+        text,
+        score: 0.85,
+        line_content: line_content.to_string(),
+    })
 }
 
 // =============================================================================
@@ -434,13 +462,10 @@ const GLINER_LABELS: &[(&str, &str)] = &[
 ];
 
 pub struct GlinerBackend {
-    model: Mutex<gliner::model::GLiNER<gliner::model::pipeline::span::SpanMode>>,
+    models: Pool<gliner::model::GLiNER<gliner::model::pipeline::span::SpanMode>>,
     entity_labels: Vec<String>,
     label_map: std::collections::HashMap<String, &'static str>,
 }
-
-// gliner::GLiNER holds an ort::Session (Send, not Sync); wrap in Mutex.
-unsafe impl Sync for GlinerBackend {}
 
 impl GlinerBackend {
     fn load() -> Result<Self> {
@@ -467,15 +492,23 @@ impl GlinerBackend {
             "GLiNER tokenizer",
         )?;
 
-        let params = Parameters::default().with_threshold(GLINER_THRESHOLD);
-        let runtime = RuntimeParameters::default();
-        let model = GLiNER::<SpanMode>::new(
-            params,
-            runtime,
-            tokenizer_path.to_str().context("tokenizer path")?,
-            model_path.to_str().context("model path")?,
-        )
-        .map_err(|e| anyhow::anyhow!("gline-rs load: {e}"))?;
+        // GLiNER sessions are larger (~400MB resident). Cap the pool at 2 —
+        // past that we blow the RAM budget without a matching throughput gain
+        // since gline-rs inference is already internally parallel.
+        let n = pool_size().min(2);
+        let mp = model_path.clone();
+        let tp = tokenizer_path.clone();
+        let models = Pool::new(n, move || {
+            let params = Parameters::default().with_threshold(GLINER_THRESHOLD);
+            let runtime = RuntimeParameters::default();
+            GLiNER::<SpanMode>::new(
+                params,
+                runtime,
+                tp.to_str().context("tokenizer path")?,
+                mp.to_str().context("model path")?,
+            )
+            .map_err(|e| anyhow::anyhow!("gline-rs load: {e}"))
+        })?;
 
         let entity_labels: Vec<String> = GLINER_LABELS.iter().map(|(g, _)| g.to_string()).collect();
         let label_map: std::collections::HashMap<String, &'static str> = GLINER_LABELS
@@ -483,9 +516,13 @@ impl GlinerBackend {
             .map(|(g, p)| (g.to_string(), *p))
             .collect();
 
-        tracing::debug!("GLiNER loaded: model={}", model_path.display());
+        tracing::debug!(
+            "GLiNER loaded: model={} pool_size={}",
+            model_path.display(),
+            n
+        );
         Ok(Self {
-            model: Mutex::new(model),
+            models,
             entity_labels,
             label_map,
         })
@@ -531,7 +568,7 @@ impl GlinerBackend {
         };
 
         let output = {
-            let model = self.model.lock().unwrap();
+            let model = self.models.checkout();
             match model.inference(text_input) {
                 Ok(o) => o,
                 Err(e) => {

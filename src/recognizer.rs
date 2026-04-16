@@ -26,6 +26,8 @@ impl RecognizerSet {
                 Box::new(PhoneCandidateRecognizer::new()),
                 Box::new(SsnCandidateRecognizer::new()),
                 Box::new(IpCandidateRecognizer::new()),
+                Box::new(DriverLicenseCandidateRecognizer::new()),
+                Box::new(PassportCandidateRecognizer::new()),
             ],
         }
     }
@@ -268,4 +270,52 @@ fn regex_candidates(
         });
     }
     out
+}
+
+pub struct DriverLicenseCandidateRecognizer {
+    re: Regex,
+}
+
+impl DriverLicenseCandidateRecognizer {
+    pub fn new() -> Self {
+        // Letter-prefixed US DL shapes — we intentionally do NOT match pure
+        // numeric formats (e.g. AL/AK/CT/MS) because those collide with dates
+        // (YYYYMMDD), timestamps, and opaque IDs all over real code. If you
+        // need to catch those in your project, add a project-specific
+        // recognizer. Reference: adambullmer/USDLRegex.
+        Self {
+            re: Regex::new(r"\b[A-Z]{1,3}\d{6,15}\b").unwrap(),
+        }
+    }
+}
+
+impl Recognizer for DriverLicenseCandidateRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "US_DRIVER_LICENSE"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        regex_candidates(file, text, &self.re, self.entity_type(), 0.5)
+    }
+}
+
+pub struct PassportCandidateRecognizer {
+    re: Regex,
+}
+
+impl PassportCandidateRecognizer {
+    pub fn new() -> Self {
+        // piicrawler.com: `\b[A-Z]{1,2}[0-9]{6,9}\b` — 1-2 upper prefix + 6-9 digits.
+        Self {
+            re: Regex::new(r"\b[A-Z]{1,2}\d{6,9}\b").unwrap(),
+        }
+    }
+}
+
+impl Recognizer for PassportCandidateRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "US_PASSPORT"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        regex_candidates(file, text, &self.re, self.entity_type(), 0.5)
+    }
 }

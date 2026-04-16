@@ -3,6 +3,7 @@ mod ignorelist;
 mod migrate;
 mod ner;
 mod output;
+mod pool;
 mod recognizer;
 mod walker;
 
@@ -54,6 +55,12 @@ struct Cli {
     #[arg(long = "only-issues")]
     only_issues: bool,
 
+    /// Verbose: stream every candidate (strict/broad regex and NER) to stderr,
+    /// including candidates that were filtered out. Useful for tuning hybrid
+    /// modes and diagnosing misses.
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
@@ -95,7 +102,8 @@ fn main() -> Result<()> {
     let paths = discover_files(&cli.paths, cli.pr)?;
     tracing::debug!("discovery: {} files", paths.len());
 
-    let (results, receiver) = start_pipeline(paths, recognizers, ner, ignorelist, cli.model);
+    let (results, receiver) =
+        start_pipeline(paths, recognizers, ner, ignorelist, cli.model, cli.verbose);
     let formatter = Formatter::new(cli.format, cli.only_issues);
     let all_findings = stream_and_collect(receiver, &formatter)?;
 
@@ -139,6 +147,7 @@ fn start_pipeline(
     ner: NerEngine,
     ignorelist: Ignorelist,
     model: Model,
+    verbose: bool,
 ) -> (Pipeline, Receiver<FileOutcome>) {
     let (tx, rx) = bounded::<FileOutcome>(64);
     let recognizers = Arc::new(recognizers);
@@ -147,7 +156,7 @@ fn start_pipeline(
 
     let handle = std::thread::spawn(move || {
         paths.par_iter().for_each_with(tx, |tx, path| {
-            let outcome = scan_one_file(path, &recognizers, &ner, &ignorelist, model);
+            let outcome = scan_one_file(path, &recognizers, &ner, &ignorelist, model, verbose);
             let _ = tx.send(outcome);
         });
     });
@@ -161,6 +170,7 @@ fn scan_one_file(
     ner: &NerEngine,
     ignorelist: &Ignorelist,
     model: Model,
+    verbose: bool,
 ) -> FileOutcome {
     let file_str = path.to_string_lossy().into_owned();
 
@@ -183,43 +193,131 @@ fn scan_one_file(
         return FileOutcome::skipped(file_str);
     }
 
-    // Strict regex findings: always kept.
-    let mut strict: Vec<Finding> = Vec::new();
-    for recognizer in recognizers.strict_iter() {
-        strict.extend(recognizer.analyze(&file_str, &text));
-    }
+    // Strict regex findings. Apply ignorelist immediately so ignored lines
+    // don't force expensive NER work in hybrid mode.
+    let strict: Vec<Finding> = recognizers
+        .strict_iter()
+        .flat_map(|r| r.analyze(&file_str, &text))
+        .filter(|f| {
+            let keep = !ignorelist.is_ignored(f);
+            if verbose {
+                log_candidate("strict", f, if keep { "kept" } else { "ignored" });
+            }
+            keep
+        })
+        .collect();
 
     let findings = if model.is_hybrid() {
-        // Hybrid mode: broad recognizers act as line-level triggers only —
-        // their findings aren't emitted. NER runs on the union of lines that
-        // strict or broad recognizers flagged, and NER's findings are the
-        // source of truth for PHONE/SSN/IP/etc. Strict findings are always kept.
-        let mut tentative_lines: HashSet<u32> = strict.iter().map(|f| f.line_num).collect();
-        for recognizer in recognizers.broad_iter() {
-            for f in recognizer.analyze(&file_str, &text) {
-                tentative_lines.insert(f.line_num);
-            }
-        }
+        // Hybrid: broad regex produces candidates; NER acts as a pure validator.
+        // A broad candidate is kept only if NER reports an entity of the same
+        // type that overlaps the candidate. NER-only findings (entity types NOT
+        // caught by any broad regex, e.g. PERSON/ORG/LOC) are dropped — those
+        // require non-hybrid `--model bert` or `--model gliner`.
+        //
+        // This matches the user's original intent: "broad regex finds candidates,
+        // NER filters false positives".
+        let broad_candidates: Vec<Finding> = recognizers
+            .broad_iter()
+            .flat_map(|r| r.analyze(&file_str, &text))
+            .filter(|f| {
+                let keep = !ignorelist.is_ignored(f);
+                if verbose && !keep {
+                    log_candidate("broad", f, "ignored");
+                }
+                keep
+            })
+            .collect();
 
-        let ner_findings = if tentative_lines.is_empty() {
+        let tentative_lines: HashSet<u32> = strict
+            .iter()
+            .chain(broad_candidates.iter())
+            .map(|f| f.line_num)
+            .collect();
+
+        let ner_findings: Vec<Finding> = if tentative_lines.is_empty() {
             Vec::new()
         } else {
             ner.analyze_with_filter(&file_str, &text, Some(&tentative_lines))
         };
 
-        dedupe_findings(merge_findings(strict, Vec::new(), ner_findings))
+        // Build a quick lookup of (line, entity_type) → NER spans to confirm against.
+        let mut ner_spans_by_key: std::collections::HashMap<(u32, String), Vec<(u32, u32)>> =
+            std::collections::HashMap::new();
+        for n in &ner_findings {
+            ner_spans_by_key
+                .entry((n.line_num, n.entity_type.clone()))
+                .or_default()
+                .push((n.col_start, n.col_end));
+        }
+
+        let validated: Vec<Finding> = broad_candidates
+            .into_iter()
+            .filter_map(|c| {
+                let spans = ner_spans_by_key.get(&(c.line_num, c.entity_type.clone()));
+                let confirmed = spans
+                    .map(|ss| {
+                        ss.iter()
+                            .any(|&(s, e)| spans_overlap((c.col_start, c.col_end), (s, e)))
+                    })
+                    .unwrap_or(false);
+                if verbose {
+                    log_candidate(
+                        "broad",
+                        &c,
+                        if confirmed {
+                            "ner-confirmed"
+                        } else {
+                            "ner-dropped"
+                        },
+                    );
+                }
+                if confirmed {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .filter(|f| !ignorelist.is_ignored(f))
+            .collect();
+
+        dedupe_findings(merge_findings(strict, validated, Vec::new()))
     } else {
-        // Non-hybrid: strict regex + full NER scan, deduped.
-        let ner_findings = ner.analyze(&file_str, &text);
+        // Non-hybrid: strict regex + full NER scan. Apply ignorelist to NER
+        // findings as they stream in (we can't skip NER lines here since
+        // there's no regex-candidate signal to filter on).
+        let ner_findings: Vec<Finding> = ner
+            .analyze(&file_str, &text)
+            .into_iter()
+            .filter(|f| {
+                let keep = !ignorelist.is_ignored(f);
+                if verbose {
+                    log_candidate("ner", f, if keep { "kept" } else { "ignored" });
+                }
+                keep
+            })
+            .collect();
         dedupe_findings(merge_findings(strict, Vec::new(), ner_findings))
     };
 
-    let findings: Vec<Finding> = findings
-        .into_iter()
-        .filter(|f| !ignorelist.is_ignored(f))
-        .collect();
-
     FileOutcome::scanned(file_str, findings)
+}
+
+fn spans_overlap(a: (u32, u32), b: (u32, u32)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
+fn log_candidate(source: &str, f: &Finding, status: &str) {
+    eprintln!(
+        "verbose {file}:{line}:{col} {source:6} {entity:<18} score={score:.2} {status:<13} {text:?}",
+        file = f.file,
+        line = f.line_num,
+        col = f.col_start + 1,
+        source = source,
+        entity = f.entity_type,
+        score = f.score,
+        status = status,
+        text = f.text,
+    );
 }
 
 fn merge_findings(

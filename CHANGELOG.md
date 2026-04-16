@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-15
+
+### Added
+
+- `--verbose` (`-v`) flag streams each candidate and filter decision to stderr
+  with source tag (strict/broad/ner) and score. Use to tune hybrid modes and
+  diagnose what got kept or dropped.
+- Session pooling for BERT (4 sessions) and GLiNER (2 sessions) removes the
+  single-Mutex bottleneck — rayon threads can now run NER concurrently.
+- Batched BERT inference: 32 lines per ort forward pass with padded tensors
+  instead of one call per line. Amortizes per-call overhead.
+- Broad recognizers for `US_DRIVER_LICENSE` and `US_PASSPORT` so those types
+  can flow through hybrid modes.
+
+### Changed
+
+- **Hybrid semantic now strict**: `--model regex+bert` / `--model regex+gliner`
+  emit only strict regex findings + broad regex candidates that NER confirms
+  (same entity type, overlapping span). NER-only findings are dropped. This
+  fixes GLiNER false positives like `US_DRIVER_LICENSE` hallucinations on
+  numeric IDs. For PERSON / ORGANIZATION / LOCATION detection, use the
+  non-hybrid `--model bert` or `--model gliner`.
+- Ignorelist applied before NER: candidates that match an ignore rule no
+  longer trigger NER inference on their line.
+- `DriverLicenseCandidateRecognizer` requires a 1-3 letter prefix. Pure-numeric
+  state DL formats (AL/AK/CT/MS) collide with dates, timestamps, and opaque
+  IDs too often to be useful triggers — users who need them can add a
+  project-specific recognizer.
+
+### Performance
+
+Clara backend, cold scan (each run in isolation to avoid shared warm cache):
+
+| Mode | v0.3.0 | v0.4.0 |
+|---|---|---|
+| `regex` | 0.55s | 0.55s |
+| `regex+bert` | 1.3s | ~1.6s |
+| `regex+gliner` | 3.7s | **1.4s** |
+
 ## [0.3.0] - 2026-04-15
 
 ### Added
