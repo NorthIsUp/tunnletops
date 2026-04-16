@@ -68,6 +68,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -78,9 +80,32 @@ jobs:
           cd artifacts
           sha256sum tunnletops-* > checksums-sha256.txt
 
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          # Extract the [version] section from CHANGELOG.md (stops at next ## heading).
+          notes=$(awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { flag=1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md)
+          if [ -z "$notes" ]; then
+            echo "No changelog entry found for v${version}; using auto-generated notes only."
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          else
+            {
+              echo 'notes<<CHANGELOG_EOF'
+              echo "$notes"
+              echo 'CHANGELOG_EOF'
+            } >> $GITHUB_OUTPUT
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ steps.changelog.outputs.has_notes == 'true' && steps.changelog.outputs.notes || '' }}
           generate_release_notes: true
           files: |
             artifacts/tunnletops-*
