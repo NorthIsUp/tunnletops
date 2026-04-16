@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-04-16
+
+### Changed
+
+- Readability polish for saved ignorelists:
+  - Each `[[ignored]]` block now starts with its identifying field —
+    `type` for whole-file skips, `entity_type` for everything else.
+  - Extra blank line between different entity_type groups so the
+    file scans like sections at a glance.
+  - `None` fields are omitted from output (no more empty lines).
+
 ## [0.5.5] - 2026-04-16
 
 ### Fixed

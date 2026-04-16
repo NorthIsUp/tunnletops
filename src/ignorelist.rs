@@ -17,17 +17,22 @@ use crate::finding::Finding;
 ///   all findings of a given type in a file).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IgnoreEntry {
-    #[serde(default, rename = "type")]
+    // Field order here is the TOML serialization order. We put the "what
+    // kind of entry is this?" fields first (type for whole-file skips;
+    // entity_type for regular), then narrowing scope/file/line, then the
+    // matcher (text / pattern). Makes each [[ignored]] block's first
+    // visible line tell you what it's about.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-    #[serde(default)]
-    pub file: Option<String>,
-    #[serde(default)]
-    pub line: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Optional regex applied to the finding's text. When set, takes
     /// precedence over `text`. Use TOML literal strings (single quotes)
@@ -36,7 +41,7 @@ pub struct IgnoreEntry {
     /// ```toml
     /// pattern = '@\w+\.askclara\.com'
     /// ```
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
 }
 
@@ -195,12 +200,53 @@ impl Ignorelist {
             },
         };
         let text = toml::to_string_pretty(&file).context("serializing ignorelist")?;
+        let text = insert_group_breaks(&text);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
         }
         fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+}
+
+/// Insert an extra blank line between consecutive `[[ignored]]` blocks
+/// whose `entity_type` or `type` header field changes. Makes groupings
+/// visible without restructuring the file.
+fn insert_group_breaks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut prev_header: Option<String> = None;
+    for block in text.split_inclusive("\n\n") {
+        let trimmed = block.trim_start();
+        let header = if trimmed.starts_with("[[ignored]]") {
+            // Identify the group: first of entity_type / type value.
+            extract_header_field(trimmed, "entity_type")
+                .or_else(|| extract_header_field(trimmed, "type"))
+        } else {
+            None
+        };
+        if let (Some(prev), Some(cur)) = (&prev_header, &header) {
+            if prev != cur {
+                out.push('\n');
+            }
+        }
+        out.push_str(block);
+        if header.is_some() {
+            prev_header = header;
+        }
+    }
+    out
+}
+
+fn extract_header_field<'a>(block: &'a str, field: &str) -> Option<String> {
+    for line in block.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(field) {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                return Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Deterministic sort key for `[[ignored]]` entries.
