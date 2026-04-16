@@ -8,21 +8,34 @@ pub trait Recognizer: Send + Sync {
 }
 
 pub struct RecognizerSet {
-    recognizers: Vec<Box<dyn Recognizer>>,
+    /// Always run. High precision — regex + validator (Luhn, entropy).
+    strict: Vec<Box<dyn Recognizer>>,
+    /// Only run in hybrid modes. Broader patterns that produce candidates for
+    /// NER validation. Without NER, these would be too noisy to emit.
+    broad: Vec<Box<dyn Recognizer>>,
 }
 
 impl RecognizerSet {
     pub fn default_set() -> Self {
         Self {
-            recognizers: vec![
+            strict: vec![
                 Box::new(EmailRecognizer::new()),
                 Box::new(CreditCardRecognizer::new()),
+            ],
+            broad: vec![
+                Box::new(PhoneCandidateRecognizer::new()),
+                Box::new(SsnCandidateRecognizer::new()),
+                Box::new(IpCandidateRecognizer::new()),
             ],
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &dyn Recognizer> {
-        self.recognizers.iter().map(|r| r.as_ref())
+    pub fn strict_iter(&self) -> impl Iterator<Item = &dyn Recognizer> {
+        self.strict.iter().map(|r| r.as_ref())
+    }
+
+    pub fn broad_iter(&self) -> impl Iterator<Item = &dyn Recognizer> {
+        self.broad.iter().map(|r| r.as_ref())
     }
 }
 
@@ -153,4 +166,106 @@ fn luhn_valid(digits: &str) -> bool {
         alt = !alt;
     }
     sum % 10 == 0
+}
+
+// -----------------------------------------------------------------------------
+// Broad candidate recognizers (hybrid mode only)
+//
+// These are deliberately high-recall / low-precision: they emit anything that
+// looks vaguely like PII. Hybrid mode runs NER on the surrounding lines to
+// filter false positives. Without NER these would drown a real finding in
+// hundreds of ID columns, port numbers, and version strings — so they do not
+// appear in `RecognizerSet::strict`.
+// -----------------------------------------------------------------------------
+
+pub struct PhoneCandidateRecognizer {
+    re: Regex,
+}
+
+impl PhoneCandidateRecognizer {
+    pub fn new() -> Self {
+        // US-ish: optional leading +1, then 3+3+4 digits with common separators.
+        Self {
+            re: Regex::new(r"\+?1?[-. ]?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b").unwrap(),
+        }
+    }
+}
+
+impl Recognizer for PhoneCandidateRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "PHONE_NUMBER"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        regex_candidates(file, text, &self.re, self.entity_type(), 0.5)
+    }
+}
+
+pub struct SsnCandidateRecognizer {
+    re: Regex,
+}
+
+impl SsnCandidateRecognizer {
+    pub fn new() -> Self {
+        // NNN-NN-NNNN or NNN NN NNNN — no checksum.
+        Self {
+            re: Regex::new(r"\b\d{3}[- ]\d{2}[- ]\d{4}\b").unwrap(),
+        }
+    }
+}
+
+impl Recognizer for SsnCandidateRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "US_SSN"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        regex_candidates(file, text, &self.re, self.entity_type(), 0.5)
+    }
+}
+
+pub struct IpCandidateRecognizer {
+    re: Regex,
+}
+
+impl IpCandidateRecognizer {
+    pub fn new() -> Self {
+        // IPv4 — permissive (matches version strings too; that's what NER is for).
+        Self {
+            re: Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap(),
+        }
+    }
+}
+
+impl Recognizer for IpCandidateRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "IP_ADDRESS"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        regex_candidates(file, text, &self.re, self.entity_type(), 0.5)
+    }
+}
+
+fn regex_candidates(
+    file: &str,
+    text: &str,
+    re: &Regex,
+    entity_type: &str,
+    score: f32,
+) -> Vec<Finding> {
+    let line_starts = compute_line_starts(text);
+    let mut out = Vec::new();
+    for m in re.find_iter(text) {
+        let (line_num, col_start, col_end, line_content) =
+            resolve_position(text, &line_starts, m.start(), m.end());
+        out.push(Finding {
+            file: file.to_string(),
+            line_num,
+            col_start,
+            col_end,
+            entity_type: entity_type.to_string(),
+            text: m.as_str().to_string(),
+            score,
+            line_content,
+        });
+    }
+    out
 }

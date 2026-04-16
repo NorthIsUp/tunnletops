@@ -20,6 +20,7 @@ use crate::ner::{Model, NerEngine};
 use crate::output::Formatter;
 use crate::recognizer::RecognizerSet;
 use crate::walker::discover_files;
+use std::collections::HashSet;
 
 const DEFAULT_IGNORELIST: &str = ".baselines/phi.toml";
 
@@ -89,12 +90,12 @@ fn main() -> Result<()> {
 
     let ignorelist = Ignorelist::load_or_empty(DEFAULT_IGNORELIST)?;
     let recognizers = RecognizerSet::default_set();
-    let ner = NerEngine::load(cli.model).context("loading NER model")?;
+    let ner = NerEngine::load(cli.model.ner_kind()).context("loading NER model")?;
 
     let paths = discover_files(&cli.paths, cli.pr)?;
     tracing::debug!("discovery: {} files", paths.len());
 
-    let (results, receiver) = start_pipeline(paths, recognizers, ner, ignorelist);
+    let (results, receiver) = start_pipeline(paths, recognizers, ner, ignorelist, cli.model);
     let formatter = Formatter::new(cli.format, cli.only_issues);
     let all_findings = stream_and_collect(receiver, &formatter)?;
 
@@ -137,6 +138,7 @@ fn start_pipeline(
     recognizers: RecognizerSet,
     ner: NerEngine,
     ignorelist: Ignorelist,
+    model: Model,
 ) -> (Pipeline, Receiver<FileOutcome>) {
     let (tx, rx) = bounded::<FileOutcome>(64);
     let recognizers = Arc::new(recognizers);
@@ -145,7 +147,7 @@ fn start_pipeline(
 
     let handle = std::thread::spawn(move || {
         paths.par_iter().for_each_with(tx, |tx, path| {
-            let outcome = scan_one_file(path, &recognizers, &ner, &ignorelist);
+            let outcome = scan_one_file(path, &recognizers, &ner, &ignorelist, model);
             let _ = tx.send(outcome);
         });
     });
@@ -158,6 +160,7 @@ fn scan_one_file(
     recognizers: &RecognizerSet,
     ner: &NerEngine,
     ignorelist: &Ignorelist,
+    model: Model,
 ) -> FileOutcome {
     let file_str = path.to_string_lossy().into_owned();
 
@@ -180,15 +183,76 @@ fn scan_one_file(
         return FileOutcome::skipped(file_str);
     }
 
-    let mut findings: Vec<Finding> = Vec::new();
-    for recognizer in recognizers.iter() {
-        findings.extend(recognizer.analyze(&file_str, &text));
+    // Strict regex findings: always kept.
+    let mut strict: Vec<Finding> = Vec::new();
+    for recognizer in recognizers.strict_iter() {
+        strict.extend(recognizer.analyze(&file_str, &text));
     }
-    findings.extend(ner.analyze(&file_str, &text));
 
-    findings.retain(|f| !ignorelist.is_ignored(f));
+    let findings = if model.is_hybrid() {
+        // Hybrid mode: broad recognizers act as line-level triggers only —
+        // their findings aren't emitted. NER runs on the union of lines that
+        // strict or broad recognizers flagged, and NER's findings are the
+        // source of truth for PHONE/SSN/IP/etc. Strict findings are always kept.
+        let mut tentative_lines: HashSet<u32> = strict.iter().map(|f| f.line_num).collect();
+        for recognizer in recognizers.broad_iter() {
+            for f in recognizer.analyze(&file_str, &text) {
+                tentative_lines.insert(f.line_num);
+            }
+        }
+
+        let ner_findings = if tentative_lines.is_empty() {
+            Vec::new()
+        } else {
+            ner.analyze_with_filter(&file_str, &text, Some(&tentative_lines))
+        };
+
+        dedupe_findings(merge_findings(strict, Vec::new(), ner_findings))
+    } else {
+        // Non-hybrid: strict regex + full NER scan, deduped.
+        let ner_findings = ner.analyze(&file_str, &text);
+        dedupe_findings(merge_findings(strict, Vec::new(), ner_findings))
+    };
+
+    let findings: Vec<Finding> = findings
+        .into_iter()
+        .filter(|f| !ignorelist.is_ignored(f))
+        .collect();
 
     FileOutcome::scanned(file_str, findings)
+}
+
+fn merge_findings(
+    strict: Vec<Finding>,
+    validated_tentative: Vec<Finding>,
+    ner: Vec<Finding>,
+) -> Vec<Finding> {
+    let mut out = strict;
+    out.extend(validated_tentative);
+    out.extend(ner);
+    out
+}
+
+/// Collapse findings that point at the same entity at the same location.
+/// Keeps the one with the highest score.
+fn dedupe_findings(mut findings: Vec<Finding>) -> Vec<Finding> {
+    findings.sort_by(|a, b| {
+        (&a.file, a.line_num, a.col_start, a.col_end, &a.entity_type)
+            .cmp(&(&b.file, b.line_num, b.col_start, b.col_end, &b.entity_type))
+            .then(
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    findings.dedup_by(|a, b| {
+        a.file == b.file
+            && a.line_num == b.line_num
+            && a.col_start == b.col_start
+            && a.col_end == b.col_end
+            && a.entity_type == b.entity_type
+    });
+    findings
 }
 
 fn stream_and_collect(

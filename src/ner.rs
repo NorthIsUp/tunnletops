@@ -34,6 +34,37 @@ pub enum Model {
     /// Produces PERSON / EMAIL_ADDRESS / PHONE_NUMBER / US_SSN / CREDIT_CARD /
     /// IP_ADDRESS / US_PASSPORT / US_DRIVER_LICENSE / LOCATION / ORGANIZATION.
     Gliner,
+    /// Regex candidates + BERT validation. Broad regexes find candidates;
+    /// BERT runs only on candidate lines. Fast, but BERT can only confirm
+    /// PERSON/ORG/LOC, so PHONE/SSN/IP candidates are dropped.
+    #[value(name = "regex+bert")]
+    RegexBert,
+    /// Regex candidates + GLiNER validation. Broad regexes find candidates;
+    /// GLiNER validates each on the candidate's line. Best precision/recall
+    /// trade-off for PII.
+    #[value(name = "regex+gliner")]
+    RegexGliner,
+}
+
+/// Which NER engine to load, independent of whether we're in hybrid mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NerKind {
+    Bert,
+    Gliner,
+}
+
+impl Model {
+    pub fn ner_kind(self) -> Option<NerKind> {
+        match self {
+            Model::Regex => None,
+            Model::Bert | Model::RegexBert => Some(NerKind::Bert),
+            Model::Gliner | Model::RegexGliner => Some(NerKind::Gliner),
+        }
+    }
+
+    pub fn is_hybrid(self) -> bool {
+        matches!(self, Model::RegexBert | Model::RegexGliner)
+    }
 }
 
 pub struct NerEngine {
@@ -47,22 +78,22 @@ enum Backend {
 }
 
 impl NerEngine {
-    pub fn load(model: Model) -> Result<Self> {
-        match model {
-            Model::Regex => {
+    pub fn load(kind: Option<NerKind>) -> Result<Self> {
+        match kind {
+            None => {
                 tracing::debug!("NER backend: regex (disabled)");
                 Ok(Self {
                     backend: Backend::None,
                 })
             }
-            Model::Bert => {
+            Some(NerKind::Bert) => {
                 tracing::debug!("NER backend: bert");
                 let bert = BertBackend::load().context("loading BERT NER backend")?;
                 Ok(Self {
                     backend: Backend::Bert(Box::new(bert)),
                 })
             }
-            Model::Gliner => {
+            Some(NerKind::Gliner) => {
                 tracing::debug!("NER backend: gliner");
                 let gliner = GlinerBackend::load().context("loading GLiNER backend")?;
                 Ok(Self {
@@ -73,10 +104,21 @@ impl NerEngine {
     }
 
     pub fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        self.analyze_with_filter(file, text, None)
+    }
+
+    /// Analyze only the given set of 1-based line numbers (hybrid mode speedup).
+    /// If `lines` is `None`, analyzes the full text.
+    pub fn analyze_with_filter(
+        &self,
+        file: &str,
+        text: &str,
+        lines: Option<&std::collections::HashSet<u32>>,
+    ) -> Vec<Finding> {
         match &self.backend {
             Backend::None => Vec::new(),
-            Backend::Bert(b) => b.analyze(file, text),
-            Backend::Gliner(g) => g.analyze(file, text),
+            Backend::Bert(b) => b.analyze_with_filter(file, text, lines),
+            Backend::Gliner(g) => g.analyze_with_filter(file, text, lines),
         }
     }
 }
@@ -149,16 +191,27 @@ impl BertBackend {
         })
     }
 
-    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+    fn analyze_with_filter(
+        &self,
+        file: &str,
+        text: &str,
+        line_filter: Option<&std::collections::HashSet<u32>>,
+    ) -> Vec<Finding> {
         let mut all = Vec::new();
         let lines: Vec<&str> = text.lines().collect();
 
         for (line_idx, line) in lines.iter().enumerate() {
+            let line_num = (line_idx + 1) as u32;
+            if let Some(filter) = line_filter {
+                if !filter.contains(&line_num) {
+                    continue;
+                }
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.len() < 3 {
                 continue;
             }
-            match self.analyze_line(file, (line_idx + 1) as u32, line, trimmed) {
+            match self.analyze_line(file, line_num, line, trimmed) {
                 Ok(findings) => all.extend(findings),
                 Err(e) => {
                     tracing::debug!("NER error on {}:{}: {e:#}", file, line_idx + 1);
@@ -438,7 +491,12 @@ impl GlinerBackend {
         })
     }
 
-    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+    fn analyze_with_filter(
+        &self,
+        file: &str,
+        text: &str,
+        line_filter: Option<&std::collections::HashSet<u32>>,
+    ) -> Vec<Finding> {
         use gliner::model::input::text::TextInput;
 
         // Process per-line so byte offsets map cleanly to (line_num, col).
@@ -446,6 +504,12 @@ impl GlinerBackend {
         let mut inputs: Vec<&str> = Vec::with_capacity(lines.len());
         let mut input_line_idx: Vec<usize> = Vec::with_capacity(lines.len());
         for (i, line) in lines.iter().enumerate() {
+            let line_num = (i + 1) as u32;
+            if let Some(filter) = line_filter {
+                if !filter.contains(&line_num) {
+                    continue;
+                }
+            }
             let trimmed = line.trim();
             if trimmed.len() < 3 || line.len() > 2000 {
                 continue;

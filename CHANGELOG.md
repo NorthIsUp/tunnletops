@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-15
+
+### Added
+
+- `--model regex+bert` and `--model regex+gliner` hybrid modes. Broad regex
+  recognizers (PHONE_NUMBER, US_SSN, IP_ADDRESS) trigger NER on candidate
+  lines only, skipping 99%+ of source files entirely. Dramatically faster than
+  pure NER modes while still catching the NER-visible entity types.
+- New broad recognizers active only in hybrid modes: `PhoneCandidateRecognizer`,
+  `SsnCandidateRecognizer`, `IpCandidateRecognizer`. Deliberately high-recall /
+  low-precision — NER filters the false positives.
+- Finding dedupe: when the same (file, line, col, entity_type) appears from
+  multiple sources (regex + NER), keep the highest-scored one.
+
+### Changed
+
+- `RecognizerSet` split into `strict_iter()` (always) and `broad_iter()`
+  (hybrid-only). `--model regex` continues to produce only strict findings.
+- `NerEngine::load` now takes `Option<NerKind>` so the model selection and the
+  hybrid flag are orthogonal.
+
+### Performance
+
+Clara backend (thousands of files) cold scan:
+
+| Mode | Time |
+|---|---|
+| `regex` | 0.55s |
+| `regex+bert` | 1.3s |
+| `regex+gliner` | 3.7s |
+| `bert` | 3m 23s |
+| `gliner` | 10m+ |
+
 ## [0.2.1] - 2026-04-15
 
 ### Fixed
