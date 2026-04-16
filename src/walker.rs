@@ -40,7 +40,7 @@ fn has_skipped_dir_component(path: &Path) -> bool {
     path.components().any(|c| {
         c.as_os_str()
             .to_str()
-            .is_some_and(|s| SKIP_DIRS.iter().any(|d| *d == s))
+            .is_some_and(|s| SKIP_DIRS.contains(&s))
     })
 }
 

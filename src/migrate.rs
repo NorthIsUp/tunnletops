@@ -32,10 +32,10 @@ struct LegacyEntry {
 }
 
 pub fn migrate(input: &Path, output: &Path) -> Result<()> {
-    let yaml_text = fs::read_to_string(input)
-        .with_context(|| format!("reading {}", input.display()))?;
-    let legacy: LegacyFile = serde_yaml::from_str(&yaml_text)
-        .with_context(|| format!("parsing {}", input.display()))?;
+    let yaml_text =
+        fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+    let legacy: LegacyFile =
+        serde_yaml::from_str(&yaml_text).with_context(|| format!("parsing {}", input.display()))?;
 
     // phi-scan's `_is_ignored` falls back to the arbitrary top-level YAML key
     // when a `type: file` entry has no explicit `file:` field. Preserve that.
@@ -63,14 +63,12 @@ pub fn migrate(input: &Path, output: &Path) -> Result<()> {
     }
 
     let toml_file = IgnorelistFile { ignored: entries };
-    let toml_text =
-        toml::to_string_pretty(&toml_file).context("serializing tunnletops TOML")?;
+    let toml_text = toml::to_string_pretty(&toml_file).context("serializing tunnletops TOML")?;
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).ok();
     }
-    fs::write(output, toml_text)
-        .with_context(|| format!("writing {}", output.display()))?;
+    fs::write(output, toml_text).with_context(|| format!("writing {}", output.display()))?;
 
     eprintln!(
         "migrated {} -> {} ({} entries)",

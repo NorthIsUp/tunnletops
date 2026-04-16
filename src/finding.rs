@@ -50,10 +50,7 @@ pub fn resolve_position(
         Err(i) => i.saturating_sub(1),
     };
     let line_start = line_starts[line_idx];
-    let line_end = line_starts
-        .get(line_idx + 1)
-        .copied()
-        .unwrap_or_else(|| text.len());
+    let line_end = line_starts.get(line_idx + 1).copied().unwrap_or(text.len());
     let line_content = text[line_start..line_end]
         .trim_end_matches('\n')
         .to_string();

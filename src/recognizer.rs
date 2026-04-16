@@ -154,4 +154,3 @@ fn luhn_valid(digits: &str) -> bool {
     }
     sum % 10 == 0
 }
-

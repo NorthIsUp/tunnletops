@@ -3,10 +3,10 @@
 //! tunnletops pipes every file through a single shared `NerEngine`. The
 //! backend is selected at startup via `--model`:
 //!
-//! * `regex`  — no NER, pure regex recognizers (fastest)
-//! * `gliner` — GLiNER PII quantized ONNX model via `ort` + `tokenizers`
+//! * `regex` — no NER, pure regex recognizers (fastest)
+//! * `bert`  — Xenova/bert-base-NER quantized ONNX via `ort` + `tokenizers`
 //!
-//! Default is `gliner` to preserve parity with phi-scan's observable surface.
+//! Default is `bert` to preserve parity with phi-scan's observable surface.
 //! `regex` exists as an explicit opt-out for CI paths that don't need NER.
 
 use std::fs;
@@ -174,8 +174,8 @@ impl BertBackend {
         let input_ids: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
         let attention_mask: Vec<i64> = mask.iter().map(|&x| x as i64).collect();
 
-        let input_ids_arr = ndarray::Array2::from_shape_vec((1, n), input_ids)
-            .context("input_ids shape")?;
+        let input_ids_arr =
+            ndarray::Array2::from_shape_vec((1, n), input_ids).context("input_ids shape")?;
         let attn_arr = ndarray::Array2::from_shape_vec((1, n), attention_mask)
             .context("attention_mask shape")?;
         let token_type_ids = vec![0i64; n];
@@ -184,8 +184,7 @@ impl BertBackend {
 
         let ids_tensor =
             ort::value::Tensor::<i64>::from_array(input_ids_arr).context("ids tensor")?;
-        let attn_tensor =
-            ort::value::Tensor::<i64>::from_array(attn_arr).context("attn tensor")?;
+        let attn_tensor = ort::value::Tensor::<i64>::from_array(attn_arr).context("attn tensor")?;
         let ttype_tensor =
             ort::value::Tensor::<i64>::from_array(token_type_arr).context("token_type tensor")?;
 
@@ -221,7 +220,7 @@ impl BertBackend {
             }
             let label = LABEL_TABLE.get(best_class).copied().unwrap_or("O");
 
-            if label.starts_with("B-") {
+            if let Some(stripped) = label.strip_prefix("B-") {
                 if let Some((start, end, ent)) = current.take() {
                     if let Some(f) = self.span_to_finding(
                         file,
@@ -237,10 +236,10 @@ impl BertBackend {
                         findings.push(f);
                     }
                 }
-                current = Some((t, t, &label[2..]));
-            } else if label.starts_with("I-") {
+                current = Some((t, t, stripped));
+            } else if let Some(stripped) = label.strip_prefix("I-") {
                 if let Some((start, end, ent)) = &current {
-                    if *ent == &label[2..] {
+                    if *ent == stripped {
                         current = Some((*start, t, ent));
                     } else {
                         if let Some(f) = self.span_to_finding(
@@ -256,10 +255,10 @@ impl BertBackend {
                         ) {
                             findings.push(f);
                         }
-                        current = Some((t, t, &label[2..]));
+                        current = Some((t, t, stripped));
                     }
                 } else {
-                    current = Some((t, t, &label[2..]));
+                    current = Some((t, t, stripped));
                 }
             } else {
                 // "O"
@@ -283,7 +282,15 @@ impl BertBackend {
         // flush
         if let Some((start, end, ent)) = current.take() {
             if let Some(f) = self.span_to_finding(
-                file, line_num, line_content, trimmed, indent, offsets, start, end, ent,
+                file,
+                line_num,
+                line_content,
+                trimmed,
+                indent,
+                offsets,
+                start,
+                end,
+                ent,
             ) {
                 findings.push(f);
             }
@@ -350,7 +357,8 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
         .with_context(|| format!("downloading {label}"))?
         .into_reader();
     let mut buf = Vec::new();
-    resp.read_to_end(&mut buf).context("reading download body")?;
+    resp.read_to_end(&mut buf)
+        .context("reading download body")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }
