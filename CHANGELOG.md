@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-15
+
+### Fixed
+
+- Clippy lints (`unwrap_or` vs `unwrap_or_else`, `strip_prefix`, `SKIP_DIRS.contains`).
+- Stale module doc comment in `src/ner.rs` still referenced the gliner backend.
+
+### Added
+
+- CHANGELOG.md (Keep a Changelog format).
+- Release workflow now extracts the matching version section from CHANGELOG.md
+  and uses it as the release body.
+
 ## [0.1.0] - 2026-04-15
 
 ### Added
