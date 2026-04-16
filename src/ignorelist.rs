@@ -131,13 +131,16 @@ impl Ignorelist {
 }
 
 /// Port of phi-scan's text-matching logic in `_is_ignored`. A missing text
-/// means "any text matches"; for EMAIL_ADDRESS, a leading `@` matches by
-/// domain and a trailing `@` matches by username (both case-insensitive).
+/// means "any text matches". All comparisons are case-insensitive — email
+/// casing is canonically insensitive, and it's annoying to get bitten by
+/// `Admin@Example.com` vs `admin@example.com` for other entity types too.
+/// For EMAIL_ADDRESS, a leading `@` matches by domain and a trailing `@`
+/// matches by username.
 fn text_matches(entry: &IgnoreEntry, f: &Finding) -> bool {
     let Some(txt) = entry.text.as_deref() else {
         return true;
     };
-    if txt == f.text {
+    if txt.eq_ignore_ascii_case(&f.text) {
         return true;
     }
     if f.entity_type == "EMAIL_ADDRESS" {

@@ -21,8 +21,13 @@ impl Formatter {
     }
 
     /// Per-file streaming status line — matches phi-scan's run_without_progress output.
+    /// In `github` format we suppress it: GitHub Actions parses stdout for
+    /// `::error::` annotations and the streaming lines would pollute the output.
     pub fn emit_file_status(&self, outcome: &FileOutcome) {
         if outcome.skipped {
+            return;
+        }
+        if matches!(self.format, Format::Github) {
             return;
         }
         if !outcome.findings.is_empty() {
