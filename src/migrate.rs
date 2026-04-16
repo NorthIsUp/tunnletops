@@ -62,7 +62,10 @@ pub fn migrate(input: &Path, output: &Path) -> Result<()> {
         });
     }
 
-    let toml_file = IgnorelistFile { ignored: entries };
+    let toml_file = IgnorelistFile {
+        ignored: entries,
+        entities: Default::default(),
+    };
     let toml_text = toml::to_string_pretty(&toml_file).context("serializing tunnletops TOML")?;
 
     if let Some(parent) = output.parent() {

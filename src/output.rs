@@ -133,14 +133,23 @@ fn render_diagnostic(f: &Finding) {
 pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result<()> {
     let mut ignorelist = Ignorelist::load_or_empty(ignorelist_path)
         .with_context(|| format!("loading {}", ignorelist_path))?;
+    let mut seen: std::collections::HashSet<(String, String, String)> = Default::default();
     let mut added = 0usize;
     for outcome in outcomes {
         for f in &outcome.findings {
+            // Use `scope = "file"` (not "line") so the ignore survives when
+            // the line shifts from edits above it. Matches any occurrence of
+            // `(entity_type, text)` in this file. Dedupe so we don't write
+            // the same entry once per occurrence.
+            let key = (f.file.clone(), f.entity_type.clone(), f.text.clone());
+            if !seen.insert(key) {
+                continue;
+            }
             ignorelist.append(IgnoreEntry {
                 kind: None,
-                scope: Some("line".to_string()),
+                scope: Some("file".to_string()),
                 file: Some(f.file.clone()),
-                line: Some(f.line_num.to_string()),
+                line: None,
                 entity_type: Some(f.entity_type.clone()),
                 text: Some(f.text.clone()),
             });

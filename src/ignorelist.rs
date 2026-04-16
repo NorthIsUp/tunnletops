@@ -34,12 +34,27 @@ pub struct IgnoreEntry {
 pub struct IgnorelistFile {
     #[serde(default)]
     pub ignored: Vec<IgnoreEntry>,
+    /// Per-project enable/disable of entity types.
+    #[serde(default)]
+    pub entities: EntitiesConfig,
+}
+
+/// `[entities]` section. All entity types are enabled by default;
+/// `disabled` turns specific types off, and takes precedence over `enabled`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EntitiesConfig {
+    /// Entity types to skip entirely (recognizer doesn't run, NER findings
+    /// of this type are dropped). Case-sensitive — match the emitted
+    /// `entity_type` exactly, e.g. `"URL"`, `"MAC_ADDRESS"`.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Ignorelist {
     entries: Vec<IgnoreEntry>,
     whole_file_skips: HashSet<String>,
+    disabled_entities: HashSet<String>,
 }
 
 impl Ignorelist {
@@ -61,7 +76,12 @@ impl Ignorelist {
             }
             out.entries.push(e);
         }
+        out.disabled_entities = file.entities.disabled.into_iter().collect();
         Ok(out)
+    }
+
+    pub fn is_entity_disabled(&self, entity_type: &str) -> bool {
+        self.disabled_entities.contains(entity_type)
     }
 
     pub fn is_file_skipped(&self, file: &str) -> bool {
@@ -120,6 +140,9 @@ impl Ignorelist {
         let path = path.as_ref();
         let file = IgnorelistFile {
             ignored: self.entries.clone(),
+            entities: EntitiesConfig {
+                disabled: self.disabled_entities.iter().cloned().collect(),
+            },
         };
         let text = toml::to_string_pretty(&file).context("serializing ignorelist")?;
         if let Some(parent) = path.parent() {

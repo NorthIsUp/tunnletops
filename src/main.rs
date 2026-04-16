@@ -228,10 +228,12 @@ fn scan_one_file(
         return FileOutcome::skipped(file_str);
     }
 
-    // Strict regex findings. Apply ignorelist immediately so ignored lines
-    // don't force expensive NER work in hybrid mode.
+    // Strict regex findings. Skip recognizers whose entity type is disabled
+    // via `[entities] disabled = [...]` — saves regex work. Apply ignorelist
+    // immediately so ignored lines don't force expensive NER work in hybrid.
     let strict: Vec<Finding> = recognizers
         .strict_iter()
+        .filter(|r| !ignorelist.is_entity_disabled(r.entity_type()))
         .flat_map(|r| r.analyze(&file_str, &text))
         .filter(|f| {
             let keep = !ignorelist.is_ignored(f);
@@ -253,6 +255,7 @@ fn scan_one_file(
         // NER filters false positives".
         let broad_candidates: Vec<Finding> = recognizers
             .broad_iter()
+            .filter(|r| !ignorelist.is_entity_disabled(r.entity_type()))
             .flat_map(|r| r.analyze(&file_str, &text))
             .filter(|f| {
                 let keep = !ignorelist.is_ignored(f);
@@ -273,6 +276,9 @@ fn scan_one_file(
             Vec::new()
         } else {
             ner.analyze_with_filter(&file_str, &text, Some(&tentative_lines))
+                .into_iter()
+                .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
+                .collect()
         };
 
         // Build a quick lookup of (line, entity_type) → NER spans to confirm against.
@@ -323,6 +329,7 @@ fn scan_one_file(
         let ner_findings: Vec<Finding> = ner
             .analyze(&file_str, &text)
             .into_iter()
+            .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
             .filter(|f| {
                 let keep = !ignorelist.is_ignored(f);
                 if verbose {

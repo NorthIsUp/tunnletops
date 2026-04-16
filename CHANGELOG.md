@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-04-16
+
+### Added
+
+- `[entities]` section in `phi.toml` — disable specific entity types
+  per-project. Recognizers whose type is disabled don't run at all;
+  NER findings of disabled types are dropped.
+  Example:
+  ```toml
+  [entities]
+  disabled = ["URL", "MAC_ADDRESS"]
+  ```
+
+### Changed
+
+- `--fix-accept-all` now writes `scope = "file"` entries instead of
+  `scope = "line"`. Ignores survive when a line shifts from edits above
+  it — same `(file, entity_type, text)` anywhere in the file still
+  matches. Existing `scope = "line"` entries with numeric `line = "N"`
+  continue to work for users who want strict line-anchored matching.
+- `fix-accept-all` dedupes by `(file, entity_type, text)` so the same
+  email appearing 9 times in a seed file now writes one `[[ignored]]`
+  entry instead of 9 identical ones.
+
 ## [0.5.0] - 2026-04-16
 
 ### Added
