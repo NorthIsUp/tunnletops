@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-04-16
+
+### Fixed
+
+- `clippy::needless_lifetimes` on `extract_header_field` (v0.5.6 CI lint).
+
 ## [0.5.6] - 2026-04-16
 
 ### Changed

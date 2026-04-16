@@ -237,7 +237,7 @@ fn insert_group_breaks(text: &str) -> String {
     out
 }
 
-fn extract_header_field<'a>(block: &'a str, field: &str) -> Option<String> {
+fn extract_header_field(block: &str, field: &str) -> Option<String> {
     for line in block.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix(field) {
