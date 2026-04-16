@@ -283,12 +283,13 @@ pub struct UsSsnRecognizer {
 
 impl UsSsnRecognizer {
     pub fn new() -> Self {
-        // Presidio: `\b(?!000|666|9\d{2})([0-8]\d{2}|7([0-6]\d|7[012]))([-]?)\d{2}\3\d{4}\b`
-        // Rust's regex crate doesn't support the `\3` back-reference to enforce
-        // matching separators; we allow `-` or no separator independently —
-        // negligible precision loss on real SSNs.
+        // One regex covers both formats; the analyze step decides which are
+        // strict enough to emit alone vs which require context.
+        //   Dashed:   NNN-NN-NNNN (always emitted)
+        //   Compact:  NNNNNNNNN   (only emitted with an SSN context word)
         Self {
-            re: Regex::new(r"\b(?:[0-8]\d{2}|7(?:[0-6]\d|7[012]))-?\d{2}-?\d{4}\b").unwrap(),
+            re: Regex::new(r"\b(?:[0-8]\d{2}|7(?:[0-6]\d|7[012]))(?:-\d{2}-\d{4}|\d{2}\d{4})\b")
+                .unwrap(),
         }
     }
 }
@@ -298,7 +299,9 @@ impl Recognizer for UsSsnRecognizer {
         "US_SSN"
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
-        // Presidio-style area-number blacklist applied post-match.
+        // Presidio-style area-number blacklist applied post-match. For the
+        // compact (un-dashed) form, also require an SSN-context keyword on
+        // the same line to avoid flagging 9-digit IDs like `"sample_id": 123456789`.
         let line_starts = compute_line_starts(text);
         let mut out = Vec::new();
         for m in self.re.find_iter(text) {
@@ -313,6 +316,9 @@ impl Recognizer for UsSsnRecognizer {
             }
             let (line_num, col_start, col_end, line_content) =
                 resolve_position(text, &line_starts, m.start(), m.end());
+            if !raw.contains('-') && !ssn_context_mentioned(&line_content) {
+                continue;
+            }
             out.push(Finding {
                 file: file.to_string(),
                 line_num,
@@ -326,6 +332,28 @@ impl Recognizer for UsSsnRecognizer {
         }
         out
     }
+}
+
+/// Loose check for SSN context keywords on the finding's line (case-insensitive).
+/// Keep this conservative — false positives here re-admit the compact-format
+/// false positives we're trying to reject.
+fn ssn_context_mentioned(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    for needle in [
+        "ssn",
+        "social security",
+        "social_security",
+        "socialsecurity",
+        "ss#",
+        "ss num",
+        "tax id",
+        "taxpayer id",
+    ] {
+        if lower.contains(needle) {
+            return true;
+        }
+    }
+    false
 }
 
 // =============================================================================

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-04-16
+
+### Fixed
+
+- **SSN false positive** on 9-digit sample IDs like `"sample_id": "123456789"`.
+  The compact (un-dashed) SSN form now requires an SSN context keyword on
+  the same line to emit (`ssn`, `social security`, `ss#`, `tax id`, etc.,
+  case-insensitive). Traditional dashed format `NNN-NN-NNNN` still emits
+  unconditionally.
+- Regex now forces symmetric separators: either both dashes or neither,
+  no more `12345-6789` half-dashed matches.
+
 ## [0.5.11] - 2026-04-16
 
 ### Fixed
