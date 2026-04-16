@@ -375,12 +375,15 @@ struct RenderState<'a> {
 }
 
 fn render_state(frame: &mut Frame, s: &RenderState) {
+    // Pack everything to the top of the screen so the action hints sit
+    // directly under the finding instead of floating at the bottom.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // header
-            Constraint::Min(6),    // body
+            Constraint::Length(7), // body (box + up to 4 content lines)
             Constraint::Length(3), // footer
+            Constraint::Min(0),    // empty filler below
         ])
         .split(frame.area());
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-04-15
+
+### Changed
+
+- `--fix` TUI layout: action hints now sit directly under the finding
+  instead of being pushed to the bottom of the terminal. Header, body,
+  and footer pack to the top; any extra space falls below.
+
 ## [0.5.18] - 2026-04-15
 
 ### Changed
