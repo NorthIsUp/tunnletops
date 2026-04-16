@@ -30,6 +30,7 @@ const LEGACY_IGNORELIST: &str = ".baselines/phi.yaml";
 /// 1. `--baselines PATH` if provided (explicit override)
 /// 2. `.baselines/phi.toml` in cwd
 /// 3. `.baselines/phi.yaml` in cwd (legacy, read-only fallback)
+///
 /// Returns the path even if nothing exists — `load_or_empty` handles that.
 fn resolve_ignorelist_path(cli_override: Option<&Path>) -> PathBuf {
     if let Some(p) = cli_override {

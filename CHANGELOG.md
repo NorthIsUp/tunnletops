@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-04-16
+
+### Fixed
+
+- `clippy::doc_lazy_continuation` on resolve_ignorelist_path doc comment
+  (v0.5.9 CI failure).
+
 ## [0.5.9] - 2026-04-16
 
 ### Added
