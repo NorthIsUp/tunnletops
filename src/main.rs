@@ -89,6 +89,13 @@ enum Command {
         #[arg(default_value = ".baselines/phi.toml")]
         output: PathBuf,
     },
+    /// Load and re-save the ignorelist with entries sorted deterministically
+    /// (entity_type → scope → file → text/pattern). Whole-file skips go
+    /// first. `[entities]` is always alphabetical.
+    Format {
+        #[arg(default_value = ".baselines/phi.toml")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -102,8 +109,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.debug);
 
-    if let Some(Command::Migrate { input, output }) = cli.command {
-        return migrate::migrate(&input, &output);
+    match cli.command {
+        Some(Command::Migrate { input, output }) => return migrate::migrate(&input, &output),
+        Some(Command::Format { path }) => {
+            let list = Ignorelist::load_or_empty(&path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            list.save(&path)
+                .with_context(|| format!("saving {}", path.display()))?;
+            eprintln!("formatted {}", path.display());
+            return Ok(());
+        }
+        None => {}
     }
 
     let ignorelist = Ignorelist::load_or_empty(DEFAULT_IGNORELIST)?;

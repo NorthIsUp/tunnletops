@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-04-16
+
+### Added
+
+- `tunnletops format [PATH]` — load and re-save an ignorelist with
+  deterministic ordering. Diffs become meaningful, merges easier.
+  Default path: `.baselines/phi.toml`.
+
+### Changed
+
+- Saved ignorelists are now deterministically sorted:
+  - `[entities]` — alphabetical by entity name
+  - `[[ignored]]` — primary: whole-file skips first; then by
+    `entity_type`; then `scope` (global → file → line); then `file`;
+    then `pattern` or `text`.
+- `[entities]` now serializes at the top of the file (struct field
+  order: entities, then ignored).
+
 ## [0.5.3] - 2026-04-16
 
 ### Added

@@ -42,11 +42,18 @@ pub struct IgnoreEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IgnorelistFile {
+    /// Per-project enable/disable of entity types. Declared first so it
+    /// serializes above `[[ignored]]` blocks — TOML serializes struct
+    /// fields in declaration order and top-level tables conventionally
+    /// come before array-of-tables.
+    #[serde(default, skip_serializing_if = "entities_is_empty")]
+    pub entities: EntitiesConfig,
     #[serde(default)]
     pub ignored: Vec<IgnoreEntry>,
-    /// Per-project enable/disable of entity types.
-    #[serde(default)]
-    pub entities: EntitiesConfig,
+}
+
+fn entities_is_empty(e: &EntitiesConfig) -> bool {
+    e.flags.is_empty()
 }
 
 /// `[entities]` section — a flat `NAME = true|false` map. Entity types
@@ -59,10 +66,11 @@ pub struct IgnorelistFile {
 /// ```
 ///
 /// Case-sensitive — match the emitted `entity_type` exactly.
+/// `BTreeMap` so save-out is deterministically alphabetical.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntitiesConfig {
-    pub flags: std::collections::HashMap<String, bool>,
+    pub flags: std::collections::BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -174,8 +182,10 @@ impl Ignorelist {
     #[allow(dead_code)]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
+        let mut ignored = self.entries.clone();
+        ignored.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
         let file = IgnorelistFile {
-            ignored: self.entries.clone(),
+            ignored,
             entities: EntitiesConfig {
                 flags: self
                     .disabled_entities
@@ -191,6 +201,31 @@ impl Ignorelist {
         fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+}
+
+/// Deterministic sort key for `[[ignored]]` entries.
+///
+/// Order (low first): whole-file skips → entity_type → scope (global < file < line)
+/// → file → text/pattern. Entries with no entity_type or no scope go after
+/// those that have them because `Option::None` compares less than `Some(...)`
+/// — we invert that for tier so whole-file skips come FIRST.
+fn sort_key(e: &IgnoreEntry) -> (u8, String, u8, String, String) {
+    let is_whole_file = e.kind.as_deref() == Some("file");
+    let tier = if is_whole_file { 0 } else { 1 };
+    let entity = e.entity_type.clone().unwrap_or_default();
+    let scope_rank = match e.scope.as_deref() {
+        Some("global") => 0,
+        Some("file") => 1,
+        Some("line") => 2,
+        _ => 3,
+    };
+    let file = e.file.clone().unwrap_or_default();
+    let text = e
+        .pattern
+        .clone()
+        .or_else(|| e.text.clone())
+        .unwrap_or_default();
+    (tier, entity, scope_rank, file, text)
 }
 
 /// Return `true` if this ignore entry's match criteria apply to the finding.
