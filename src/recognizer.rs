@@ -234,12 +234,14 @@ impl Recognizer for PhoneRecognizer {
         let bytes = text.as_bytes();
         let mut out = Vec::new();
         for m in self.re.find_iter(text) {
-            // Skip if the match is embedded in a longer digit/separator run —
-            // otherwise we steal a phone-looking slice out of a credit card.
+            // Skip if the match is embedded in a longer alphanumeric run or
+            // in a digit/separator continuation. Phones don't appear inside
+            // identifiers (`23c432562433694d34…`), credit-card digit groups,
+            // or URL query strings (`foo=4325624336…`).
             let prev = m.start().checked_sub(1).map(|i| bytes[i]);
             let next = bytes.get(m.end()).copied();
-            let is_extension = |b: Option<u8>| matches!(b, Some(c) if c.is_ascii_digit() || c == b'-' || c == b'.');
-            if is_extension(prev) || is_extension(next) {
+            let is_word_or_sep = |b: Option<u8>| matches!(b, Some(c) if c.is_ascii_alphanumeric() || c == b'-' || c == b'.' || c == b'_');
+            if is_word_or_sep(prev) || is_word_or_sep(next) {
                 continue;
             }
 
@@ -384,13 +386,21 @@ impl Recognizer for IpV6Recognizer {
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
         // Use capture group 1 (the actual IPv6) since the outer pattern has
-        // a non-word character to anchor us.
+        // a non-word character to anchor us on the left. For the right side,
+        // we post-filter: reject if the byte after the match is a word char
+        // (hex continues: `::e` in `::endgroup`) or another `:`.
         let line_starts = compute_line_starts(text);
+        let bytes = text.as_bytes();
         let mut out = Vec::new();
         for caps in self.re.captures_iter(text) {
             let Some(m) = caps.get(1) else {
                 continue;
             };
+            if let Some(&next) = bytes.get(m.end()) {
+                if next == b':' || next.is_ascii_alphanumeric() || next == b'_' {
+                    continue;
+                }
+            }
             let (line_num, col_start, col_end, line_content) =
                 resolve_position(text, &line_starts, m.start(), m.end());
             out.push(Finding {

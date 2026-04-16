@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-04-16
+
+### Fixed
+
+- **IPv6 false positive** on sequences like `::e` in `echo "::endgroup::"`.
+  Rust's `regex` crate doesn't support lookahead, so IpV6Recognizer now
+  post-filters: reject matches where the byte after the capture is a word
+  char, `:`, or `_`. `\b` alone doesn't catch this because `e` and `n`
+  are both word chars.
+- **Phone false positive** on digit runs embedded in identifiers like
+  `23c432562433694d34cba…` (hex IDs in URL query strings). Previous
+  filter only rejected when adjacent to digits/dashes/dots; now rejects
+  any adjacent alphanumeric or `_` so phones must sit in whitespace /
+  punctuation context.
+
 ## [0.5.10] - 2026-04-16
 
 ### Fixed
