@@ -244,8 +244,10 @@ fn scan_one_file(
         return FileOutcome::skipped(file_str);
     }
 
+    let mut ignored_count = 0usize;
+
     // Strict regex findings. Skip recognizers whose entity type is disabled
-    // via `[entities] disabled = [...]` — saves regex work. Apply ignorelist
+    // via `[entities] NAME = false` — saves regex work. Apply ignorelist
     // immediately so ignored lines don't force expensive NER work in hybrid.
     let strict: Vec<Finding> = recognizers
         .strict_iter()
@@ -253,6 +255,9 @@ fn scan_one_file(
         .flat_map(|r| r.analyze(&file_str, &text))
         .filter(|f| {
             let keep = !ignorelist.is_ignored(f);
+            if !keep {
+                ignored_count += 1;
+            }
             if verbose {
                 log_candidate("strict", f, if keep { "kept" } else { "ignored" });
             }
@@ -275,6 +280,9 @@ fn scan_one_file(
             .flat_map(|r| r.analyze(&file_str, &text))
             .filter(|f| {
                 let keep = !ignorelist.is_ignored(f);
+                if !keep {
+                    ignored_count += 1;
+                }
                 if verbose && !keep {
                     log_candidate("broad", f, "ignored");
                 }
@@ -294,6 +302,13 @@ fn scan_one_file(
             ner.analyze_with_filter(&file_str, &text, Some(&tentative_lines))
                 .into_iter()
                 .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
+                .filter(|f| {
+                    let keep = !ignorelist.is_ignored(f);
+                    if !keep {
+                        ignored_count += 1;
+                    }
+                    keep
+                })
                 .collect()
         };
 
@@ -348,6 +363,9 @@ fn scan_one_file(
             .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
             .filter(|f| {
                 let keep = !ignorelist.is_ignored(f);
+                if !keep {
+                    ignored_count += 1;
+                }
                 if verbose {
                     log_candidate("ner", f, if keep { "kept" } else { "ignored" });
                 }
@@ -362,16 +380,20 @@ fn scan_one_file(
         findings
             .into_iter()
             .filter(|f| {
-                filter
+                let keep = filter
                     .iter()
-                    .any(|e| e.eq_ignore_ascii_case(&f.entity_type))
+                    .any(|e| e.eq_ignore_ascii_case(&f.entity_type));
+                if !keep {
+                    ignored_count += 1;
+                }
+                keep
             })
             .collect()
     } else {
         findings
     };
 
-    FileOutcome::scanned(file_str, findings)
+    FileOutcome::scanned(file_str, findings, ignored_count)
 }
 
 fn spans_overlap(a: (u32, u32), b: (u32, u32)) -> bool {

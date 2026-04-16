@@ -16,14 +16,19 @@ pub struct Finding {
 pub struct FileOutcome {
     pub file: String,
     pub findings: Vec<Finding>,
+    /// Count of matches that were detected but suppressed by the ignorelist
+    /// (entity-type disabled, per-rule ignore match, etc). Reported in the
+    /// per-file status line so users can see what's being filtered.
+    pub ignored_count: usize,
     pub skipped: bool,
 }
 
 impl FileOutcome {
-    pub fn scanned(file: String, findings: Vec<Finding>) -> Self {
+    pub fn scanned(file: String, findings: Vec<Finding>, ignored_count: usize) -> Self {
         Self {
             file,
             findings,
+            ignored_count,
             skipped: false,
         }
     }
@@ -32,6 +37,7 @@ impl FileOutcome {
         Self {
             file,
             findings: Vec::new(),
+            ignored_count: 0,
             skipped: true,
         }
     }

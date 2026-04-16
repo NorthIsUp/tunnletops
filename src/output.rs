@@ -30,8 +30,17 @@ impl Formatter {
         if matches!(self.format, Format::Github) {
             return;
         }
-        if !outcome.findings.is_empty() {
-            println!("{}: {} finding(s)", outcome.file, outcome.findings.len());
+        let n = outcome.findings.len();
+        let ign = outcome.ignored_count;
+        let mut parts: Vec<String> = Vec::new();
+        if n > 0 {
+            parts.push(format!("{} {}", n, plural(n, "finding", "findings")));
+        }
+        if ign > 0 {
+            parts.push(format!("{} ignored", ign));
+        }
+        if !parts.is_empty() {
+            println!("{}: {}", outcome.file, parts.join(", "));
         } else if !self.only_issues {
             println!("{}: ok", outcome.file);
         }
@@ -130,6 +139,14 @@ fn render_diagnostic(f: &Finding) {
     );
 }
 
+fn plural<'a>(n: usize, singular: &'a str, many: &'a str) -> &'a str {
+    if n == 1 {
+        singular
+    } else {
+        many
+    }
+}
+
 pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result<()> {
     let mut ignorelist = Ignorelist::load_or_empty(ignorelist_path)
         .with_context(|| format!("loading {}", ignorelist_path))?;
@@ -164,6 +181,6 @@ pub fn fix_accept_all(outcomes: &[FileOutcome], ignorelist_path: &str) -> Result
         }
         ignorelist.save(ignorelist_path)?;
     }
-    eprintln!("ignored {} finding(s)", added);
+    eprintln!("ignored {} {}", added, plural(added, "finding", "findings"));
     Ok(())
 }

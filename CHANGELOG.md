@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-04-16
+
+### Changed
+
+- Per-file status line uses proper singular/plural: `1 finding` vs
+  `2 findings` (previously always `(s)`).
+- Status line now reports the count of ignorelist-suppressed matches
+  when non-zero, e.g. `2 findings, 1 ignored`. Gives visibility into
+  how much the ignorelist is filtering on each file.
+
 ## [0.5.7] - 2026-04-16
 
 ### Fixed
