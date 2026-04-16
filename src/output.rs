@@ -130,12 +130,13 @@ fn render_diagnostic(f: &Finding) {
         "▲".magenta().bold()
     );
     println!(
-        "{}{} {}{} {}",
+        "{}{} {}{} {} {}",
         g,
         "·".cyan().bold(),
         " ".repeat(mid),
         "└──".magenta().bold(),
-        f.entity_type.magenta().bold()
+        f.entity_type.magenta().bold(),
+        format!("(σ {:.1})", f.score).dimmed()
     );
 }
 

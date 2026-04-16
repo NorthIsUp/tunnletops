@@ -104,7 +104,34 @@ impl Recognizer for EmailRecognizer {
         "EMAIL_ADDRESS"
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
-        regex_emit(file, text, &self.re, self.entity_type(), 1.0)
+        let line_starts = compute_line_starts(text);
+        let mut out = Vec::new();
+        for m in self.re.find_iter(text) {
+            let raw = m.as_str();
+            // Reject if the TLD is purely numeric (like `@1.8.1` in a GitHub
+            // Actions pin `supercharge/redis-github-action@1.8.1`). Real TLDs
+            // must contain a letter per RFC 1035.
+            if let Some((_local, domain)) = raw.rsplit_once('@') {
+                if let Some(tld) = domain.rsplit('.').next() {
+                    if !tld.chars().any(|c| c.is_ascii_alphabetic()) {
+                        continue;
+                    }
+                }
+            }
+            let (line_num, col_start, col_end, line_content) =
+                resolve_position(text, &line_starts, m.start(), m.end());
+            out.push(Finding {
+                file: file.to_string(),
+                line_num,
+                col_start,
+                col_end,
+                entity_type: self.entity_type().to_string(),
+                text: raw.to_string(),
+                score: 1.0,
+                line_content,
+            });
+        }
+        out
     }
 }
 
@@ -137,8 +164,19 @@ impl Recognizer for CreditCardRecognizer {
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
         let line_starts = compute_line_starts(text);
+        let bytes = text.as_bytes();
         let mut out = Vec::new();
         for m in self.re.find_iter(text) {
+            // Reject if embedded in a float / identifier run. A CC preceded
+            // by `.` is almost certainly digits pulled out of something like
+            // `6.349667550340612` that happens to pass Luhn by coincidence.
+            let prev = m.start().checked_sub(1).map(|i| bytes[i]);
+            let next = bytes.get(m.end()).copied();
+            let is_extension = |b: Option<u8>| matches!(b, Some(c) if c.is_ascii_alphanumeric() || c == b'.' || c == b'_');
+            if is_extension(prev) || is_extension(next) {
+                continue;
+            }
+
             let raw = m.as_str();
             let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
             if digits.len() < 13 || digits.len() > 19 {
@@ -227,6 +265,10 @@ impl PhoneRecognizer {
 
 impl Recognizer for PhoneRecognizer {
     fn entity_type(&self) -> &'static str {
+        // Umbrella type for the recognizer; actual findings emit either
+        // US_PHONE (country code 1) or INTL_PHONE. Disabling `PHONE_NUMBER`
+        // in `[entities]` skips this recognizer entirely; disabling just
+        // `US_PHONE` or `INTL_PHONE` filters at the finding level.
         "PHONE_NUMBER"
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
@@ -257,12 +299,55 @@ impl Recognizer for PhoneRecognizer {
             if !has_phone_shape(raw) {
                 continue;
             }
-            let valid = self.regions.iter().any(|r| {
-                phonenumber::parse(Some(*r), raw).is_ok_and(|n| phonenumber::is_valid(&n))
-            });
-            if !valid {
+            // Plain-digit phones (no separators) need context to disambiguate
+            // from generic numeric IDs like `getPatientByExternalId("1234567890")`.
+            let has_separator = raw.chars().any(|c| !c.is_ascii_digit() && c != '+');
+            if !has_separator {
+                let (_, _, _, line_content) =
+                    resolve_position(text, &line_starts, m.start(), m.end());
+                if !phone_context_mentioned(&line_content) {
+                    continue;
+                }
+            }
+            // NANP structural check: US/Canada phones must have area-code and
+            // exchange first digits in 2-9. `1234567890` and `1234567891` fail
+            // this — phonenumber::is_valid is sometimes too lenient on these.
+            let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+            let national = if digits.len() == 11 && digits.starts_with('1') {
+                &digits[1..]
+            } else if digits.len() == 10 {
+                digits.as_str()
+            } else {
+                ""
+            };
+            if national.len() == 10 {
+                let bytes = national.as_bytes();
+                let area_first = bytes[0];
+                let exch_first = bytes[3];
+                if !(b'2'..=b'9').contains(&area_first) || !(b'2'..=b'9').contains(&exch_first) {
+                    continue;
+                }
+            }
+            // Reject if the match is an IPv4 shape (4 dotted segments, each
+            // 1-3 digits). `3.214.229.114` would otherwise pass phonenumber
+            // as `(321)422-9114`.
+            if is_ipv4_shape(raw) {
                 continue;
             }
+            let parsed = self
+                .regions
+                .iter()
+                .find_map(|r| phonenumber::parse(Some(*r), raw).ok())
+                .filter(phonenumber::is_valid);
+            let Some(num) = parsed else {
+                continue;
+            };
+            // Country code 1 = US/Canada NANP; everything else is INTL.
+            let entity_type = if num.code().value() == 1 {
+                "US_PHONE"
+            } else {
+                "INTL_PHONE"
+            };
             let (line_num, col_start, col_end, line_content) =
                 resolve_position(text, &line_starts, m.start(), m.end());
             out.push(Finding {
@@ -270,7 +355,7 @@ impl Recognizer for PhoneRecognizer {
                 line_num,
                 col_start,
                 col_end,
-                entity_type: self.entity_type().to_string(),
+                entity_type: entity_type.to_string(),
                 text: m.as_str().to_string(),
                 score: 1.0,
                 line_content,
@@ -278,6 +363,44 @@ impl Recognizer for PhoneRecognizer {
         }
         out
     }
+}
+
+/// Return `true` if the string matches a strict IPv4 shape: four
+/// dot-separated segments, each 1-3 digits. Used to disambiguate phone
+/// candidates that happen to have 4 dotted groups.
+fn is_ipv4_shape(raw: &str) -> bool {
+    let parts: Vec<&str> = raw.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Loose check for phone-context keywords on the finding's line
+/// (case-insensitive). Only used to gate plain-digit matches — formatted
+/// numbers like `(555) 123-4567` skip this check.
+fn phone_context_mentioned(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    for needle in [
+        "phone",
+        "tel:",
+        "telephone",
+        "cell",
+        "cellphone",
+        "mobile",
+        "call ",
+        "fax",
+        "contact",
+        "whatsapp",
+        "sms",
+    ] {
+        if lower.contains(needle) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Scan a phone-candidate match for digit groups split by separators.
@@ -450,8 +573,20 @@ impl Recognizer for IpV4Recognizer {
     }
     fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
         let line_starts = compute_line_starts(text);
+        let bytes = text.as_bytes();
         let mut out = Vec::new();
         for m in self.re.find_iter(text) {
+            // Reject if embedded in a longer dotted identifier like an OID
+            // `1.2.543.1.34.1.34.134`. Check for `<digit>.` immediately
+            // before the match, or `.<digit>` immediately after.
+            let has_prior_dotted = m.start() >= 2
+                && bytes[m.start() - 1] == b'.'
+                && bytes[m.start() - 2].is_ascii_digit();
+            let has_trailing_dotted = bytes.get(m.end()) == Some(&b'.')
+                && bytes.get(m.end() + 1).is_some_and(|c| c.is_ascii_digit());
+            if has_prior_dotted || has_trailing_dotted {
+                continue;
+            }
             if self
                 .match_invalidators
                 .iter()

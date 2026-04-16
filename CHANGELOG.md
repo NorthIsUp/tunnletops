@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-04-16
+
+### Added
+
+- TUI output now shows confidence score after the entity label,
+  dimmed: `└── PHONE_NUMBER (σ 0.9)` (σ = score, 1 decimal).
+- Phone findings now emit `US_PHONE` (NANP, country code 1) or
+  `INTL_PHONE` (everything else) as distinct entity types. Disable
+  independently via `[entities]`:
+  ```toml
+  [entities]
+  INTL_PHONE = false  # only worry about US phones
+  ```
+  `PHONE_NUMBER` in `[entities]` still disables the whole recognizer
+  for a bigger hammer.
+
+### Fixed
+
+- **CC false positive on `6.349667550340612`**: Luhn + entropy accidentally
+  passed for this float's digits. Added the same embedded-in-identifier
+  check used by phone: reject if preceded/followed by alphanumeric, `.`,
+  or `_`.
+- **Email false positive on `supercharge/redis-github-action@1.8.1`**:
+  GitHub Actions version pins look like emails. Now reject when the TLD
+  has no letters (per RFC 1035, real TLDs always do).
+- **Phone false positive on `1234567890` / `1234567891`**: plain-digit
+  phones require a context keyword on the same line (`phone`, `tel`,
+  `mobile`, `contact`, etc.) and must pass NANP structural validation
+  (area code and exchange first digit in 2-9). Rejects sequential test
+  IDs and NPI numbers.
+- **Phone false positive on `3.214.229.114`**: phone with 4 dotted groups
+  and a 1-3 digit final segment is shaped like IPv4, not a phone.
+- **Phone false positive on `760292141147` in AWS ARNs**: long plain-digit
+  runs now require phone-context keywords on the line.
+- **IPv4 false positive on OIDs** like `"id": "1.2.543.1.34.1.34.134"`:
+  reject IPv4 matches that are embedded in a longer dotted-numeric
+  identifier (digit+dot immediately before, or dot+digit immediately
+  after the match).
+
+### Changed
+
+- Post-emit entity-type filter on strict findings, so setting e.g.
+  `INTL_PHONE = false` filters individual findings without disabling
+  the PhoneRecognizer as a whole.
+
 ## [0.5.14] - 2026-04-16
 
 ### Added

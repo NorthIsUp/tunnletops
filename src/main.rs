@@ -284,10 +284,14 @@ fn scan_one_file(
     // Strict regex findings. Skip recognizers whose entity type is disabled
     // via `[entities] NAME = false` — saves regex work. Apply ignorelist
     // immediately so ignored lines don't force expensive NER work in hybrid.
+    // Also filter emitted findings by entity_type (recognizers like
+    // PhoneRecognizer emit US_PHONE / INTL_PHONE — disabling one doesn't
+    // disable the whole recognizer).
     let strict: Vec<Finding> = recognizers
         .strict_iter()
         .filter(|r| !ignorelist.is_entity_disabled(r.entity_type()))
         .flat_map(|r| r.analyze(&file_str, &text))
+        .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
         .filter(|f| {
             let keep = !ignorelist.is_ignored(f);
             if !keep {
