@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -104,57 +104,124 @@ fn emit_github(findings: &[&Finding]) {
     }
 }
 
+/// Default context window shown around each finding in `tui` output format
+/// and the `--fix` TUI. The fix TUI lets the user adjust this live.
+const DEFAULT_CONTEXT_RADIUS: usize = 3;
+
 fn emit_tui(findings: &[&Finding]) {
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
     for f in findings {
-        render_diagnostic(f);
+        render_diagnostic(f, &mut cache, DEFAULT_CONTEXT_RADIUS);
         println!();
     }
 }
 
-fn render_diagnostic(f: &Finding) {
+fn render_diagnostic(f: &Finding, cache: &mut HashMap<String, Vec<String>>, radius: usize) {
     let stripped = f.line_content.trim_start();
     let indent = f.line_content.len() - stripped.len();
     let col = f.col_start as usize - indent.min(f.col_start as usize);
     let span = (f.col_end.saturating_sub(f.col_start).max(1)) as usize;
-    let gutter = f.line_num.to_string().len();
-    let g = " ".repeat(gutter + 1);
-    let ln = format!("{:>width$}", f.line_num, width = gutter);
-    let before = &stripped.get(..col).unwrap_or("");
-    let match_slice = &stripped.get(col..col + span).unwrap_or("");
-    let after = &stripped.get(col + span..).unwrap_or("");
+
+    // Pull surrounding lines from the file so the match has context. If the
+    // file can't be read we fall back to just the match line.
+    let file_lines = load_file_lines(cache, &f.file);
+    let line_idx = (f.line_num as usize).saturating_sub(1);
+    let (start_line, lines_above, lines_below) = match file_lines {
+        Some(lines) => {
+            let start = line_idx.saturating_sub(radius);
+            let above: Vec<&str> = lines
+                .get(start..line_idx)
+                .map(|s| s.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            let below: Vec<&str> = lines
+                .get(line_idx + 1..(line_idx + 1 + radius).min(lines.len()))
+                .map(|s| s.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            (start + 1, above, below)
+        }
+        None => (f.line_num as usize, Vec::new(), Vec::new()),
+    };
+
+    // Gutter width accommodates the highest line number we'll render.
+    let max_num = f.line_num as usize + lines_below.len();
+    let gutter_w = max_num.to_string().len();
+    let pad = " ".repeat(gutter_w + 1);
     let mid = col + span / 2;
+
     println!(
         "{}{} {}:{}:{}",
-        g,
+        pad,
         "┌─".cyan().bold(),
         f.file,
         f.line_num,
         f.col_start + 1
     );
+
+    for (i, line) in lines_above.iter().enumerate() {
+        let n = start_line + i;
+        let body = line.trim_start();
+        println!(
+            "{:>w$} {} {}",
+            n,
+            "│".cyan().dimmed(),
+            body.dimmed(),
+            w = gutter_w
+        );
+    }
+
+    // Match line (highlighted).
+    let before = stripped.get(..col).unwrap_or("");
+    let match_slice = stripped.get(col..col + span).unwrap_or("");
+    let after = stripped.get(col + span..).unwrap_or("");
     println!(
-        "{} {} {}{}{}",
-        ln,
+        "{:>w$} {} {}{}{}",
+        f.line_num,
         "│".cyan().bold(),
         before,
         match_slice.red().bold().underline(),
-        after
+        after,
+        w = gutter_w
     );
     println!(
         "{}{} {}{}",
-        g,
+        pad,
         "·".cyan().bold(),
         " ".repeat(mid),
         "▲".magenta().bold()
     );
     println!(
         "{}{} {}{} {} {}",
-        g,
+        pad,
         "·".cyan().bold(),
         " ".repeat(mid),
         "└──".magenta().bold(),
         f.entity_type.magenta().bold(),
         format!("(σ {:.1})", f.score).dimmed()
     );
+
+    for (i, line) in lines_below.iter().enumerate() {
+        let n = f.line_num as usize + 1 + i;
+        let body = line.trim_start();
+        println!(
+            "{:>w$} {} {}",
+            n,
+            "│".cyan().dimmed(),
+            body.dimmed(),
+            w = gutter_w
+        );
+    }
+}
+
+fn load_file_lines<'a>(
+    cache: &'a mut HashMap<String, Vec<String>>,
+    path: &str,
+) -> Option<&'a Vec<String>> {
+    if !cache.contains_key(path) {
+        let text = fs::read_to_string(path).ok()?;
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        cache.insert(path.to_string(), lines);
+    }
+    cache.get(path)
 }
 
 fn plural<'a>(n: usize, singular: &'a str, many: &'a str) -> &'a str {
@@ -242,6 +309,8 @@ fn run_streaming_tui(
 ) -> Result<StreamOutcome> {
     let mut queue: Vec<Finding> = Vec::new();
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut context_radius: usize = DEFAULT_CONTEXT_RADIUS;
     let mut idx = 0usize;
     let mut added = 0usize;
     let mut kept = 0usize;
@@ -291,8 +360,20 @@ fn run_streaming_tui(
             break;
         }
 
+        // Preload context lines for the current finding so the renderer
+        // doesn't need mutable access to the cache inside `draw`.
+        let current = queue.get(idx);
+        let (ctx_above, ctx_below, ctx_start_line) = match current {
+            Some(f) => slice_context(&mut file_cache, f, context_radius),
+            None => (Vec::new(), Vec::new(), 0),
+        };
+
         let state = RenderState {
-            current: queue.get(idx),
+            current,
+            context_above: &ctx_above,
+            context_below: &ctx_below,
+            context_start_line: ctx_start_line,
+            context_radius,
             idx,
             queue_len: queue.len(),
             added,
@@ -321,6 +402,8 @@ fn run_streaming_tui(
         }
         match key.code {
             KeyCode::Char('?') => show_help = !show_help,
+            KeyCode::Char('[') => context_radius = context_radius.saturating_sub(2),
+            KeyCode::Char(']') => context_radius = (context_radius + 2).min(20),
             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => quit = true,
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 for rem in &queue[idx..] {
@@ -363,6 +446,14 @@ fn run_streaming_tui(
 
 struct RenderState<'a> {
     current: Option<&'a Finding>,
+    // Context lines above the match (in file order). May be shorter than
+    // `context_radius` when near the top of the file.
+    context_above: &'a [String],
+    context_below: &'a [String],
+    // 1-based line number of `context_above[0]`, or of the match when there's
+    // no prior context. Used for gutter labels.
+    context_start_line: u32,
+    context_radius: usize,
     idx: usize,
     queue_len: usize,
     added: usize,
@@ -375,21 +466,28 @@ struct RenderState<'a> {
 }
 
 fn render_state(frame: &mut Frame, s: &RenderState) {
-    // Pack everything to the top of the screen so the action hints sit
-    // directly under the finding instead of floating at the bottom.
+    // Body height grows/shrinks with the context window. Cap so we don't
+    // push the footer off smaller terminals.
+    let content_lines = if s.current.is_some() {
+        1 + s.context_above.len() as u16 + 1 + 2 + s.context_below.len() as u16
+    } else {
+        3
+    };
+    let body_h = (content_lines + 2).min(frame.area().height.saturating_sub(5));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Length(7), // body (box + up to 4 content lines)
-            Constraint::Length(3), // footer
-            Constraint::Min(0),    // empty filler below
+            Constraint::Length(1),      // header
+            Constraint::Length(body_h), // body (dynamic)
+            Constraint::Length(3),      // footer
+            Constraint::Min(0),         // filler
         ])
         .split(frame.area());
 
     render_header(frame, chunks[0], s);
     if let Some(f) = s.current {
-        render_body(frame, chunks[1], f);
+        render_body(frame, chunks[1], f, s);
     } else {
         render_waiting(frame, chunks[1], s);
     }
@@ -423,7 +521,7 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
     frame.render_widget(header, area);
 }
 
-fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding) {
+fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding, s: &RenderState) {
     let stripped = f.line_content.trim_start();
     let indent = f.line_content.len() - stripped.len();
     let char_count = stripped.chars().count();
@@ -434,45 +532,75 @@ fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding) {
     let matched: String = stripped.chars().skip(col_start).take(span_len).collect();
     let after: String = stripped.chars().skip(col_start + span_len).collect();
 
-    let gutter = format!("{:>5} │ ", f.line_num);
-    let pointer_pad = " ".repeat(gutter.chars().count() + col_start);
+    // Gutter width accommodates the highest line number we'll render.
+    let max_ln = f.line_num as usize + s.context_below.len();
+    let gutter_w = max_ln.to_string().len().max(3);
+    let pointer_pad = " ".repeat(gutter_w + 3 + col_start);
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(gutter, Style::default().fg(Color::Cyan)),
-            Span::raw(before),
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, src) in s.context_above.iter().enumerate() {
+        let n = s.context_start_line as usize + i;
+        let body = src.trim_start();
+        lines.push(Line::from(vec![
             Span::styled(
-                matched,
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::raw(after),
-        ]),
-        Line::from(vec![
-            Span::raw(pointer_pad.clone()),
-            Span::styled(
-                "▲",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw(pointer_pad),
-            Span::styled(
-                format!("└── {} ", f.entity_type),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("(σ {:.1})", f.score),
+                format!("{:>w$} │ ", n, w = gutter_w),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]),
-    ];
+            Span::styled(body.to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:>w$} │ ", f.line_num, w = gutter_w),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(before),
+        Span::styled(
+            matched,
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+        Span::raw(after),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::raw(pointer_pad.clone()),
+        Span::styled(
+            "▲",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(pointer_pad),
+        Span::styled(
+            format!("└── {} ", f.entity_type),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("(σ {:.1})", f.score),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    for (i, src) in s.context_below.iter().enumerate() {
+        let n = f.line_num as usize + 1 + i;
+        let body = src.trim_start();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:>w$} │ ", n, w = gutter_w),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(body.to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
 
     let title = format!(" {}:{}:{} ", f.file, f.line_num, f.col_start + 1);
     let body = Paragraph::new(lines)
@@ -488,6 +616,30 @@ fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding) {
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(body, area);
+}
+
+/// Pull up to `radius` lines before and after the finding's match line.
+/// Returns (above, below, 1-based line number of `above[0]`) — line number
+/// falls back to the match line number when there is no prior context.
+fn slice_context(
+    cache: &mut HashMap<String, Vec<String>>,
+    f: &Finding,
+    radius: usize,
+) -> (Vec<String>, Vec<String>, u32) {
+    let Some(lines) = load_file_lines(cache, &f.file) else {
+        return (Vec::new(), Vec::new(), f.line_num);
+    };
+    let line_idx = (f.line_num as usize).saturating_sub(1);
+    let start = line_idx.saturating_sub(radius);
+    let above = lines
+        .get(start..line_idx)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    let below = lines
+        .get(line_idx + 1..(line_idx + 1 + radius).min(lines.len()))
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    ((above), below, (start + 1) as u32)
 }
 
 fn render_waiting(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState) {
@@ -523,6 +675,13 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::styled("keep  ", Style::default().fg(Color::DarkGray)),
             Span::raw("a "),
             Span::styled("accept all remaining  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("[ "),
+            Span::styled("less context  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("] "),
+            Span::styled(
+                format!("more context (±{})  ", s.context_radius),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::raw("q "),
             Span::styled("quit & save  ", Style::default().fg(Color::DarkGray)),
             Span::raw("? "),
@@ -538,6 +697,11 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::raw("  "),
             key_chip("a", "ll", Color::Green),
             Span::raw("  "),
+            key_chip("[", "]", Color::Cyan),
+            Span::styled(
+                format!(" ±{}  ", s.context_radius),
+                Style::default().fg(Color::DarkGray),
+            ),
             key_chip("q", "uit", Color::Red),
             Span::raw("  "),
             key_chip("?", "help", Color::DarkGray),

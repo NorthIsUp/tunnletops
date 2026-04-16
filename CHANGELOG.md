@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-04-15
+
+### Added
+
+- Context lines around each finding: the `tui` output format and the
+  `--fix` TUI now show ±3 source lines around the match by default,
+  rendered in a dim gutter with the match line still highlighted.
+- `--fix` TUI keys `[` and `]` adjust the context window live (0–20
+  lines). Current radius shown in the footer as `±N`.
+
 ## [0.5.19] - 2026-04-15
 
 ### Changed
