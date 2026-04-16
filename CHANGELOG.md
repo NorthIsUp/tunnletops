@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-04-15
+
+### Added
+
+- Interactive `--fix` mode: walks each finding, prompt per finding with
+  `y` (ignore in this file) / `g` (ignore globally) / `n` (keep) /
+  `a` (accept-all remaining) / `q` (quit and save) / `?` (help).
+  Writes `.baselines/phi.toml` on exit. Replaces the previous
+  "not yet implemented" stub.
+
 ## [0.5.16] - 2026-04-15
 
 ### Added

@@ -504,7 +504,7 @@ MAC_ADDRESS = true
             text: Some("https://x".into()),
             ..Default::default()
         };
-        let mut v = vec![regular.clone(), whole.clone()];
+        let mut v = [regular.clone(), whole.clone()];
         v.sort_by_key(sort_key);
         assert_eq!(v[0].kind.as_deref(), Some("file"));
     }
@@ -532,7 +532,7 @@ MAC_ADDRESS = true
             text: Some("c".into()),
             ..Default::default()
         };
-        let mut v = vec![url_file, email_line, email_global];
+        let mut v = [url_file, email_line, email_global];
         v.sort_by_key(sort_key);
         // EMAIL_ADDRESS group first (alphabetical), global (rank 0) before line (rank 2).
         assert_eq!(v[0].entity_type.as_deref(), Some("EMAIL_ADDRESS"));

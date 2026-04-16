@@ -187,8 +187,11 @@ fn main() -> Result<()> {
             write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
         )?;
     } else if cli.fix {
-        // TODO: interactive TUI fix mode (after core).
-        eprintln!("--fix mode not yet implemented; use --fix-accept-all for now");
+        let write_path = ignorelist_path.with_file_name("phi.toml");
+        output::fix_interactive(
+            &all_findings,
+            write_path.to_str().unwrap_or(DEFAULT_IGNORELIST),
+        )?;
     }
 
     drop(results);
