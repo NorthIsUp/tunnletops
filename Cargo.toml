@@ -1,6 +1,6 @@
 [package]
 name = "tunnletops"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast PHI/PII scanner for source repositories"
@@ -28,10 +28,16 @@ ureq = { version = "2", features = ["tls"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# NER inference
-ort = { version = "2.0.0-rc.9", features = ["download-binaries", "ndarray"] }
-ndarray = "0.17"
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+# NER inference.
+# gline-rs pins ort = "=2.0.0-rc.9"; we match to avoid dep duplication.
+ort = { version = "=2.0.0-rc.9", features = ["download-binaries", "ndarray"] }
+ndarray = "0.16"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+# GLiNER inference engine. `orp` is a gline-rs dep we use directly for
+# RuntimeParameters — must match gline-rs's crates.io pin exactly.
+gline-rs = "1"
+orp = "0.9"
 
 [profile.release]
 lto = "thin"

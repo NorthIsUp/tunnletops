@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-15
+
+### Added
+
+- `--model gliner` backend: GLiNER PII (knowledgator/gliner-pii-base-v1.0) via
+  [gline-rs](https://github.com/fbilhaut/gline-rs). Zero-shot span NER tuned for
+  PII — catches `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`,
+  `CREDIT_CARD`, `IP_ADDRESS`, `US_PASSPORT`, `US_DRIVER_LICENSE`, `LOCATION`,
+  `ORGANIZATION`, `MEDICAL_LICENSE`.
+- README explaining the Presidio inspiration and hk / pre-commit use case.
+
+### Changed
+
+- Pinned `ort` to `=2.0.0-rc.9` and `ndarray` to `0.16` to match gline-rs.
+- Bumped `tokenizers` to `0.21`.
+
 ## [0.1.1] - 2026-04-15
 
 ### Fixed

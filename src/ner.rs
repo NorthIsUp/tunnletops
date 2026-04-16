@@ -3,11 +3,15 @@
 //! tunnletops pipes every file through a single shared `NerEngine`. The
 //! backend is selected at startup via `--model`:
 //!
-//! * `regex` — no NER, pure regex recognizers (fastest)
-//! * `bert`  — Xenova/bert-base-NER quantized ONNX via `ort` + `tokenizers`
+//! * `regex`  — no NER, pure regex recognizers (fastest)
+//! * `bert`   — Xenova/bert-base-NER quantized ONNX via `ort` + `tokenizers`
+//!   (generic BIO NER over PER/ORG/LOC; noisy on code, best on prose)
+//! * `gliner` — knowledgator/gliner-pii-base-v1.0 via `gline-rs` (zero-shot
+//!   span NER tuned for PII: person/email/phone/SSN/credit-card/etc.)
 //!
-//! Default is `bert` to preserve parity with phi-scan's observable surface.
-//! `regex` exists as an explicit opt-out for CI paths that don't need NER.
+//! Default is `bert` for parity with phi-scan's observable surface.
+//! `regex` is the speed-optimized CI fast path.
+//! `gliner` is the PII-tuned option for more accurate catches in prose.
 
 use std::fs;
 use std::io::Read;
@@ -26,6 +30,10 @@ pub enum Model {
     /// Xenova/bert-base-NER quantized ONNX — BIO tagger over PER/ORG/LOC/MISC.
     /// Produces Presidio-compatible PERSON / ORGANIZATION / LOCATION entities.
     Bert,
+    /// knowledgator/gliner-pii-base-v1.0 — zero-shot span NER tuned for PII.
+    /// Produces PERSON / EMAIL_ADDRESS / PHONE_NUMBER / US_SSN / CREDIT_CARD /
+    /// IP_ADDRESS / US_PASSPORT / US_DRIVER_LICENSE / LOCATION / ORGANIZATION.
+    Gliner,
 }
 
 pub struct NerEngine {
@@ -35,6 +43,7 @@ pub struct NerEngine {
 enum Backend {
     None,
     Bert(Box<BertBackend>),
+    Gliner(Box<GlinerBackend>),
 }
 
 impl NerEngine {
@@ -53,6 +62,13 @@ impl NerEngine {
                     backend: Backend::Bert(Box::new(bert)),
                 })
             }
+            Model::Gliner => {
+                tracing::debug!("NER backend: gliner");
+                let gliner = GlinerBackend::load().context("loading GLiNER backend")?;
+                Ok(Self {
+                    backend: Backend::Gliner(Box::new(gliner)),
+                })
+            }
         }
     }
 
@@ -60,6 +76,7 @@ impl NerEngine {
         match &self.backend {
             Backend::None => Vec::new(),
             Backend::Bert(b) => b.analyze(file, text),
+            Backend::Gliner(g) => g.analyze(file, text),
         }
     }
 }
@@ -189,14 +206,14 @@ impl BertBackend {
             ort::value::Tensor::<i64>::from_array(token_type_arr).context("token_type tensor")?;
 
         let logits_owned: Vec<f32> = {
-            let mut session = self.session.lock().unwrap();
+            let session = self.session.lock().unwrap();
             let outputs = session
-                .run(ort::inputs![ids_tensor, attn_tensor, ttype_tensor])
+                .run(ort::inputs![ids_tensor, attn_tensor, ttype_tensor]?)
                 .context("ort run")?;
-            let (_shape, flat) = outputs[0]
+            let view = outputs[0]
                 .try_extract_tensor::<f32>()
                 .context("extracting logits")?;
-            flat.to_vec()
+            view.iter().copied().collect()
         };
         let logits_flat = &logits_owned;
         // Output shape: [1, seq_len, num_classes]. We know both from input.
@@ -334,6 +351,157 @@ impl BertBackend {
             score: 0.85,
             line_content: line_content.to_string(),
         })
+    }
+}
+
+// =============================================================================
+// GLiNER backend (knowledgator/gliner-pii-base-v1.0 via gline-rs)
+// =============================================================================
+
+const GLINER_REPO: &str = "knowledgator/gliner-pii-base-v1.0";
+const GLINER_MODEL_FILE: &str = "onnx/model_quint8.onnx";
+const GLINER_TOKENIZER_FILE: &str = "tokenizer.json";
+const GLINER_THRESHOLD: f32 = 0.5;
+
+/// GLiNER PII zero-shot labels and their Presidio entity type mappings.
+/// The first element is what we feed to GLiNER; the second is what we emit
+/// as `Finding::entity_type` so ignore rules port from phi.yaml cleanly.
+const GLINER_LABELS: &[(&str, &str)] = &[
+    ("person", "PERSON"),
+    ("organization", "ORGANIZATION"),
+    ("location", "LOCATION"),
+    ("phone number", "PHONE_NUMBER"),
+    ("email", "EMAIL_ADDRESS"),
+    ("social security number", "US_SSN"),
+    ("credit card number", "CREDIT_CARD"),
+    ("ip address", "IP_ADDRESS"),
+    ("passport number", "US_PASSPORT"),
+    ("driver license", "US_DRIVER_LICENSE"),
+    ("medical license number", "MEDICAL_LICENSE"),
+];
+
+pub struct GlinerBackend {
+    model: Mutex<gliner::model::GLiNER<gliner::model::pipeline::span::SpanMode>>,
+    entity_labels: Vec<String>,
+    label_map: std::collections::HashMap<String, &'static str>,
+}
+
+// gliner::GLiNER holds an ort::Session (Send, not Sync); wrap in Mutex.
+unsafe impl Sync for GlinerBackend {}
+
+impl GlinerBackend {
+    fn load() -> Result<Self> {
+        use gliner::model::params::Parameters;
+        use gliner::model::pipeline::span::SpanMode;
+        use gliner::model::GLiNER;
+        use orp::params::RuntimeParameters;
+
+        let cache = cache_dir()?;
+        fs::create_dir_all(&cache)
+            .with_context(|| format!("creating cache dir {}", cache.display()))?;
+
+        let model_path = cache.join("gliner-pii-base-v1.0.onnx");
+        let tokenizer_path = cache.join("gliner-pii-base-v1.0.tokenizer.json");
+
+        ensure_file(
+            &model_path,
+            &hf_url(GLINER_REPO, GLINER_MODEL_FILE),
+            "GLiNER model (~187 MB)",
+        )?;
+        ensure_file(
+            &tokenizer_path,
+            &hf_url(GLINER_REPO, GLINER_TOKENIZER_FILE),
+            "GLiNER tokenizer",
+        )?;
+
+        let params = Parameters::default().with_threshold(GLINER_THRESHOLD);
+        let runtime = RuntimeParameters::default();
+        let model = GLiNER::<SpanMode>::new(
+            params,
+            runtime,
+            tokenizer_path.to_str().context("tokenizer path")?,
+            model_path.to_str().context("model path")?,
+        )
+        .map_err(|e| anyhow::anyhow!("gline-rs load: {e}"))?;
+
+        let entity_labels: Vec<String> = GLINER_LABELS.iter().map(|(g, _)| g.to_string()).collect();
+        let label_map: std::collections::HashMap<String, &'static str> = GLINER_LABELS
+            .iter()
+            .map(|(g, p)| (g.to_string(), *p))
+            .collect();
+
+        tracing::debug!("GLiNER loaded: model={}", model_path.display());
+        Ok(Self {
+            model: Mutex::new(model),
+            entity_labels,
+            label_map,
+        })
+    }
+
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        use gliner::model::input::text::TextInput;
+
+        // Process per-line so byte offsets map cleanly to (line_num, col).
+        let lines: Vec<&str> = text.lines().collect();
+        let mut inputs: Vec<&str> = Vec::with_capacity(lines.len());
+        let mut input_line_idx: Vec<usize> = Vec::with_capacity(lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.len() < 3 || line.len() > 2000 {
+                continue;
+            }
+            inputs.push(line);
+            input_line_idx.push(i);
+        }
+        if inputs.is_empty() {
+            return Vec::new();
+        }
+
+        let label_refs: Vec<&str> = self.entity_labels.iter().map(|s| s.as_str()).collect();
+        let text_input = match TextInput::from_str(&inputs, &label_refs) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!("gliner TextInput error on {}: {e}", file);
+                return Vec::new();
+            }
+        };
+
+        let output = {
+            let model = self.model.lock().unwrap();
+            match model.inference(text_input) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::debug!("gliner inference error on {}: {e}", file);
+                    return Vec::new();
+                }
+            }
+        };
+
+        let mut findings = Vec::new();
+        for (seq_idx, spans) in output.spans.iter().enumerate() {
+            let line_num = (input_line_idx[seq_idx] + 1) as u32;
+            let line_content = lines[input_line_idx[seq_idx]];
+            for span in spans {
+                let Some(&entity_type) = self.label_map.get(span.class()) else {
+                    continue;
+                };
+                let (start, end) = span.offsets();
+                if start >= end || end > line_content.len() {
+                    continue;
+                }
+                findings.push(Finding {
+                    file: file.to_string(),
+                    line_num,
+                    col_start: start as u32,
+                    col_end: end as u32,
+                    entity_type: entity_type.to_string(),
+                    text: span.text().to_string(),
+                    score: span.probability(),
+                    line_content: line_content.to_string(),
+                });
+            }
+        }
+        findings
     }
 }
 
