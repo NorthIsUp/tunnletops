@@ -435,6 +435,16 @@ fn run_streaming_tui(
                 added += 1;
                 idx += 1;
             }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                // URL-only: ignore by domain. Silently no-op for non-URL
+                // findings or unparseable hosts so the user can spam `u`
+                // without breaking the queue.
+                if let Some(entry) = domain_scope_entry(&queue[idx]) {
+                    ignorelist.append(entry);
+                    added += 1;
+                    idx += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -510,7 +520,7 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
     };
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " tunnletops ",
+            " tunneltops ",
             Style::default()
                 .bg(Color::Magenta)
                 .fg(Color::Black)
@@ -663,7 +673,7 @@ fn render_waiting(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderStat
             Style::default().fg(Color::DarkGray),
         )),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" tunnletops "));
+    .block(Block::default().borders(Borders::ALL).title(" tunneltops "));
     frame.render_widget(body, area);
 }
 
@@ -678,7 +688,9 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::raw("d "),
             Span::styled("directory  ", Style::default().fg(Color::DarkGray)),
             Span::raw("g "),
-            Span::styled("globally   ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("globally  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("u "),
+            Span::styled("domain — *.host of URL finding (URL only)   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("a "),
             Span::styled("all remaining   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("[ ] "),
@@ -692,7 +704,7 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::styled("toggle help", Style::default().fg(Color::DarkGray)),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 "ignore ",
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
@@ -704,6 +716,12 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             key_chip("d", "ir", Color::Green),
             Span::raw("  "),
             key_chip("g", "lobal", Color::Green),
+        ];
+        if s.current.map(|f| f.entity_type == "URL").unwrap_or(false) {
+            spans.push(Span::raw("  "));
+            spans.push(key_chip("u", "domain (url)", Color::Cyan));
+        }
+        spans.extend([
             Span::styled("   ·   ", Style::default().fg(Color::DarkGray)),
             key_chip("a", "ll", Color::Yellow),
             Span::styled(
@@ -713,7 +731,8 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             key_chip("q", "uit", Color::Red),
             Span::raw("  "),
             key_chip("h", "elp", Color::DarkGray),
-        ])
+        ]);
+        Line::from(spans)
     };
     let stats = Line::from(vec![
         Span::styled(
@@ -790,6 +809,22 @@ fn global_scope_entry(f: &Finding) -> IgnoreEntry {
         text: Some(f.text.clone()),
         ..Default::default()
     }
+}
+
+/// Global URL-domain ignore entry: `text = "*.<host>"` so a single rule
+/// covers the host and every subdomain — the typical "I trust this vendor
+/// entirely" flow. Returns None if the finding isn't a URL or its host
+/// can't be parsed (key handler should no-op in that case).
+fn domain_scope_entry(f: &Finding) -> Option<IgnoreEntry> {
+    if f.entity_type != "URL" {
+        return None;
+    }
+    let host = crate::ignorelist::extract_url_host(&f.text)?;
+    Some(IgnoreEntry {
+        entity_type: Some("URL".to_string()),
+        text: Some(format!("*.{host}")),
+        ..Default::default()
+    })
 }
 
 fn save_if_added(ignorelist: &Ignorelist, ignorelist_path: &str, added: usize) -> Result<()> {

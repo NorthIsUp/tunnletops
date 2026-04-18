@@ -2289,8 +2289,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tunnletops"
-version = "0.5.22"
+name = "tunneltops"
+version = "0.5.23"
 dependencies = [
  "aho-corasick",
  "anyhow",

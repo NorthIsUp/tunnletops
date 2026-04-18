@@ -72,7 +72,7 @@ pub fn migrate(input: &Path, output: &Path) -> Result<()> {
         fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
     let toml_file =
         load_legacy_yaml(&yaml_text).with_context(|| format!("parsing {}", input.display()))?;
-    let toml_text = toml::to_string_pretty(&toml_file).context("serializing tunnletops TOML")?;
+    let toml_text = toml::to_string_pretty(&toml_file).context("serializing tunneltops TOML")?;
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).ok();

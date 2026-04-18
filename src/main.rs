@@ -48,7 +48,7 @@ fn resolve_ignorelist_path(cli_override: Option<&Path>) -> PathBuf {
 }
 
 #[derive(Parser)]
-#[command(name = "tunnletops", version, about = "Fast PHI/PII scanner")]
+#[command(name = "tunneltops", version, about = "Fast PHI/PII scanner")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -109,7 +109,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Convert a legacy phi.yaml ignorelist to tunnletops TOML format.
+    /// Convert a legacy phi.yaml ignorelist to tunneltops TOML format.
     Migrate {
         #[arg(default_value = ".baselines/phi.yaml")]
         input: PathBuf,

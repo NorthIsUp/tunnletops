@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.23] - 2026-04-17
+
+### Added
+
+- URL allowlisting via `*.host` text wildcard. `text = "*.metriport.com"`
+  on a URL ignore entry matches the apex host plus every subdomain
+  (dot-boundary suffix, so `notmetriport.com` is rejected). Mirrors the
+  existing email convention where `text = "@askclara.com"` matches by
+  domain. Plain `text = "metriport.com"` remains an exact-string match.
+- `--fix` TUI: new `u` keybinding (URL findings only) writes
+  `text = "*.<host>"` for the current finding's host.
+
+### Fixed
+
+- Project name typo: `tunnletops` → `tunneltops` across the binary,
+  Cargo manifest, README, release artifacts, and the `directories`
+  cache namespace. Existing model caches under the old name will be
+  re-downloaded once on first run.
+
 ## [0.5.22] - 2026-04-15
 
 ### Changed
@@ -214,11 +233,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--baselines PATH` flag to explicitly point at an ignorelist. Useful
-  when running tunnletops from a different working tree than the one
+  when running tunneltops from a different working tree than the one
   that owns `.baselines/phi.toml` (e.g. running from the main repo
   while your `phi.toml` lives in a worktree).
 - Legacy `phi.yaml` read-only fallback: if `.baselines/phi.toml`
-  doesn't exist but `.baselines/phi.yaml` does, tunnletops reads the
+  doesn't exist but `.baselines/phi.yaml` does, tunneltops reads the
   YAML. Ignore rules come through; `[entities]` section isn't
   expressible in legacy YAML so entity-disable doesn't apply.
   `--fix-accept-all` always writes TOML (friendly upgrade path).
@@ -268,7 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `tunnletops format [PATH]` — load and re-save an ignorelist with
+- `tunneltops format [PATH]` — load and re-save an ignorelist with
   deterministic ordering. Diffs become meaningful, merges easier.
   Default path: `.baselines/phi.toml`.
 
@@ -504,7 +523,7 @@ Clara backend (thousands of files) cold scan:
 - Pure-regex mode (`--model regex`) for ML-free CI fast path.
 - TOML ignorelist compatible with `phi.yaml` semantics: line, file, global, whole-file
   scopes plus email domain/username wildcards.
-- `tunnletops migrate` subcommand — one-shot conversion from legacy `phi.yaml`.
+- `tunneltops migrate` subcommand — one-shot conversion from legacy `phi.yaml`.
 - Streaming per-file output matching phi-scan's format.
 - Output formats: `plain`, `github` (GitHub Actions), `tui` (colored diagnostics).
 - `--fix-accept-all` for pre-commit hook integration.

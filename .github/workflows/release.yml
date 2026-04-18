@@ -14,19 +14,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: tunnletops-x86_64-linux
+            artifact: tunneltops-x86_64-linux
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: tunnletops-aarch64-linux
+            artifact: tunneltops-aarch64-linux
           # x86_64-apple-darwin dropped: ort doesn't publish prebuilt
           # ONNX Runtime binaries for it. Apple Silicon covers modern Macs;
           # Intel users can run the aarch64 build via Rosetta.
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: tunnletops-aarch64-darwin
+            artifact: tunneltops-aarch64-darwin
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: tunnletops-x86_64-windows.exe
+            artifact: tunneltops-x86_64-windows.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -53,11 +53,11 @@ jobs:
 
       - name: Rename binary (unix)
         if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/tunnletops ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/tunneltops ${{ matrix.artifact }}
 
       - name: Rename binary (windows)
         if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/tunnletops.exe ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/tunneltops.exe ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -78,7 +78,7 @@ jobs:
       - name: Create checksums
         run: |
           cd artifacts
-          sha256sum tunnletops-* > checksums-sha256.txt
+          sha256sum tunneltops-* > checksums-sha256.txt
 
       - name: Extract changelog section
         id: changelog
@@ -108,5 +108,5 @@ jobs:
           body: ${{ steps.changelog.outputs.has_notes == 'true' && steps.changelog.outputs.notes || '' }}
           generate_release_notes: true
           files: |
-            artifacts/tunnletops-*
+            artifacts/tunneltops-*
             artifacts/checksums-sha256.txt

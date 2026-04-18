@@ -1,11 +1,11 @@
 [package]
-name = "tunnletops"
-version = "0.5.22"
+name = "tunneltops"
+version = "0.5.23"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast PHI/PII scanner for source repositories"
 license = "MIT"
-repository = "https://github.com/northisup/tunnletops"
+repository = "https://github.com/northisup/tunneltops"
 
 [dependencies]
 anyhow = "1"
@@ -49,5 +49,5 @@ codegen-units = 1
 strip = true
 
 [[bin]]
-name = "tunnletops"
+name = "tunneltops"
 path = "src/main.rs"

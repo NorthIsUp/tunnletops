@@ -1,6 +1,6 @@
-//! NER backends for tunnletops.
+//! NER backends for tunneltops.
 //!
-//! tunnletops pipes every file through a single shared `NerEngine`. The
+//! tunneltops pipes every file through a single shared `NerEngine`. The
 //! backend is selected at startup via `--model`:
 //!
 //! * `regex`  — no NER, pure regex recognizers (fastest)
@@ -639,7 +639,7 @@ impl GlinerBackend {
 }
 
 fn cache_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("ai", "northisup", "tunnletops")
+    let dirs = directories::ProjectDirs::from("ai", "northisup", "tunneltops")
         .context("cannot locate user cache dir")?;
     Ok(dirs.cache_dir().to_path_buf())
 }
@@ -652,7 +652,7 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    eprintln!("tunnletops: downloading {label} from {url}");
+    eprintln!("tunneltops: downloading {label} from {url}");
     let mut resp = ureq::get(url)
         .call()
         .with_context(|| format!("downloading {label}"))?
@@ -664,6 +664,6 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
         fs::create_dir_all(parent).ok();
     }
     fs::write(path, &buf).with_context(|| format!("writing {}", path.display()))?;
-    eprintln!("tunnletops: cached {label} at {}", path.display());
+    eprintln!("tunneltops: cached {label} at {}", path.display());
     Ok(())
 }

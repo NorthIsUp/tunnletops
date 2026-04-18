@@ -401,12 +401,53 @@ fn matches_criteria(entry: &IgnoreEntry, compiled: Option<&Regex>, f: &Finding) 
     text_matches(entry, f)
 }
 
+/// Pull the host out of a URL-ish string. Handles bare hosts (`github.com`),
+/// schemed URLs (`https://github.com/foo`), userinfo prefixes
+/// (`https://user@github.com`), ports (`github.com:8080`), and the trailing
+/// path/query/fragment. Lowercased and stripped of any trailing root dot so
+/// callers can use it as a stable comparison key.
+pub fn extract_url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let after_user = after_scheme.rsplit_once('@').map(|(_, r)| r).unwrap_or(after_scheme);
+    let host_end = after_user
+        .find(|c: char| matches!(c, '/' | '?' | '#' | ':'))
+        .unwrap_or(after_user.len());
+    let host = &after_user[..host_end];
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.trim_end_matches('.').to_ascii_lowercase())
+    }
+}
+
+/// Test the URL `*.host` wildcard convention against a finding's URL.
+/// `*.github.com` matches `github.com` itself plus any subdomain;
+/// suffix-spoofing (`notgithub.com`) is rejected by requiring a dot
+/// boundary. Returns false (deferring to plain text match) for non-wildcard
+/// inputs or unparseable URLs.
+fn url_wildcard_matches(pattern: &str, finding_text: &str) -> bool {
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return false;
+    }
+    let Some(host) = extract_url_host(finding_text) else {
+        return false;
+    };
+    let suffix = suffix.to_ascii_lowercase();
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
 /// Port of phi-scan's text-matching logic in `_is_ignored`. A missing text
 /// means "any text matches". All comparisons are case-insensitive — email
 /// casing is canonically insensitive, and it's annoying to get bitten by
 /// `Admin@Example.com` vs `admin@example.com` for other entity types too.
-/// For EMAIL_ADDRESS, a leading `@` matches by domain and a trailing `@`
-/// matches by username.
+///
+/// Per-entity wildcards layered on top of the literal compare:
+/// - EMAIL_ADDRESS: leading `@` matches by domain, trailing `@` by username.
+/// - URL: `*.host` matches the apex host plus any subdomain (dot-boundary
+///   suffix, so `notgithub.com` does not match `*.github.com`).
 fn text_matches(entry: &IgnoreEntry, f: &Finding) -> bool {
     let Some(txt) = entry.text.as_deref() else {
         return true;
@@ -423,6 +464,9 @@ fn text_matches(entry: &IgnoreEntry, f: &Finding) -> bool {
         if txt_lower.ends_with('@') && finding_lower.starts_with(&txt_lower) {
             return true;
         }
+    }
+    if f.entity_type == "URL" && url_wildcard_matches(txt, &f.text) {
+        return true;
     }
     false
 }
@@ -689,6 +733,62 @@ MAC_ADDRESS = true
         assert!(!list.is_entity_disabled("MAC_ADDRESS"));
         assert!(!list.is_entity_disabled("EMAIL_ADDRESS"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extract_url_host_handles_common_shapes() {
+        assert_eq!(extract_url_host("https://github.com/foo").as_deref(), Some("github.com"));
+        assert_eq!(extract_url_host("http://api.github.com:8080/x").as_deref(), Some("api.github.com"));
+        assert_eq!(extract_url_host("github.com").as_deref(), Some("github.com"));
+        assert_eq!(extract_url_host("github.com/path").as_deref(), Some("github.com"));
+        assert_eq!(extract_url_host("https://user@example.org/x").as_deref(), Some("example.org"));
+        // Returned host is normalized to lowercase.
+        assert_eq!(extract_url_host("HTTPS://Example.COM/").as_deref(), Some("example.com"));
+        assert_eq!(extract_url_host(""), None);
+    }
+
+    #[test]
+    fn url_text_wildcard_matches_subdomains_and_apex() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            scope: Some("global".into()),
+            text: Some("*.metriport.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://metriport.com/", "x", 1)));
+        assert!(list.is_ignored(&mk_finding("URL", "https://api.metriport.com/x", "x", 1)));
+        assert!(list.is_ignored(&mk_finding("URL", "https://a.b.metriport.com/y", "x", 1)));
+        // Suffix-spoofing must not match.
+        assert!(!list.is_ignored(&mk_finding("URL", "https://notmetriport.com/", "x", 1)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://example.com/metriport.com", "x", 1)));
+    }
+
+    #[test]
+    fn url_text_wildcard_only_applies_to_url_entity() {
+        // `*.host` text on a non-URL entity falls through to literal compare,
+        // so it shouldn't accidentally match unrelated finding types.
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("*.metriport.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(!list.is_ignored(&mk_finding("EMAIL_ADDRESS", "u@metriport.com", "x", 1)));
+    }
+
+    #[test]
+    fn url_text_wildcard_with_file_scope() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            path: Some("docs/**".into()),
+            text: Some("*.github.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://api.github.com", "docs/a.md", 1)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://api.github.com", "src/app.py", 1)));
     }
 
     #[test]
