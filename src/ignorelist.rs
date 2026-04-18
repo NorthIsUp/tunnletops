@@ -70,6 +70,14 @@ pub struct IgnoreEntry {
     /// Mutually exclusive with `match` on a single entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Opt out of glob auto-detection on `text`. Default (unset / true)
+    /// promotes a `text` containing `*`/`?`/`[` to an anchored glob; set
+    /// to `false` to keep `text` strictly literal even when it looks
+    /// glob-y. Useful for matching paths or expressions that genuinely
+    /// contain `*` (e.g. `text = "C:\\Users\\*\\AppData"` literal). The
+    /// per-entity wildcards (email `@host`, URL `*.host`) still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub textglob: Option<bool>,
     /// Regex over the finding's full text. `pattern` is accepted as a
     /// silent alias for backward compatibility; `save()` writes `match`.
     /// Use TOML literal strings (single quotes) to avoid double-escaping
@@ -306,7 +314,11 @@ impl Ignorelist {
                     None
                 }
             });
-            let text_glob = e.text.as_deref().and_then(compile_glob);
+            let text_glob = if e.textglob == Some(false) {
+                None
+            } else {
+                e.text.as_deref().and_then(compile_glob)
+            };
             let line_spec = match e.line.as_deref() {
                 Some(s) => Some(LineSpec::parse(s).map_err(|m| {
                     anyhow::anyhow!("invalid `line` in {}: {}", path.display(), m)
@@ -391,7 +403,11 @@ impl Ignorelist {
             }
         }
         let regex = entry.regex.as_ref().and_then(|p| Regex::new(p).ok());
-        let text_glob = entry.text.as_deref().and_then(compile_glob);
+        let text_glob = if entry.textglob == Some(false) {
+            None
+        } else {
+            entry.text.as_deref().and_then(compile_glob)
+        };
         let line_spec = entry.line.as_deref().and_then(|s| LineSpec::parse(s).ok());
         self.entries.push(entry);
         self.compiled.push(CompiledMatchers {
@@ -938,6 +954,23 @@ MAC_ADDRESS = true
         let list = with_entries(vec![entry]);
         assert!(list.is_ignored(&mk_finding("US_SSN", "123-45-6789", "x", 1)));
         assert!(!list.is_ignored(&mk_finding("US_SSN", "999-45-6789", "x", 1)));
+    }
+
+    #[test]
+    fn textglob_false_forces_literal_compare() {
+        // Without `textglob = false`, the `*` would make this a glob and
+        // match any 4-digit suffix. With it off, only the literal string
+        // matches.
+        let entry = IgnoreEntry {
+            entity_type: Some("US_SSN".into()),
+            scope: Some("global".into()),
+            text: Some("123-45-*".into()),
+            textglob: Some(false),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("US_SSN", "123-45-*", "x", 1)));
+        assert!(!list.is_ignored(&mk_finding("US_SSN", "123-45-6789", "x", 1)));
     }
 
     #[test]

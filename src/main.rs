@@ -88,6 +88,10 @@ MATCHERS (one per entry — `text` and `match` are mutually exclusive):
   text = \"...\"             literal compare; auto-promoted to glob if it
                           contains * ? or [. Per-entity rules layer on top
                           (email @host, URL *.host).
+  textglob = false         opt out of glob auto-detection — keep `text`
+                          strictly literal even when it contains *. Useful
+                          for matching paths/strings that genuinely contain
+                          metachars (default true).
   match = '...'           regex over the full finding text (alias: pattern).
 
 GLOB METACHARS (path and text):

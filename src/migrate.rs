@@ -58,6 +58,7 @@ pub fn load_legacy_yaml(yaml_text: &str) -> Result<IgnorelistFile> {
             }),
             entity_type: e.entity_type,
             text: e.text,
+            textglob: None,
             regex: None,
         });
     }

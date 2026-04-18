@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-04-17
+
+### Added
+
+- `textglob = false` per-entry escape hatch. Default (unset / true)
+  keeps the v0.5.25 auto-detection: `text` containing `*`/`?`/`[`
+  compiles as a glob. Setting `textglob = false` forces literal
+  compare, which lets you match strings that genuinely contain glob
+  metachars (e.g. `text = "C:\\Users\\*\\AppData"`).
+
 ## [0.5.25] - 2026-04-17
 
 ### Added
