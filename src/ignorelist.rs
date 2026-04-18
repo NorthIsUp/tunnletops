@@ -251,10 +251,29 @@ fn compile_glob(s: &str) -> Option<glob::Pattern> {
     }
 }
 
+/// Strip a single leading `./` (or `.\` on Windows-style strings) from a
+/// path so that `./documentation/foo.md` and `documentation/foo.md` are
+/// treated as the same path. The walker emits `./…` when called with `.`
+/// as the root; a glob the user writes as `documentation/**` should still
+/// match those findings, and vice versa.
+fn normalize_path(p: &str) -> &str {
+    p.strip_prefix("./")
+        .or_else(|| p.strip_prefix(".\\"))
+        .unwrap_or(p)
+}
+
+/// Compile a `path` field, normalizing the leading `./` before glob
+/// construction so `./documentation/**` and `documentation/**` produce
+/// identical match behavior.
+fn compile_path_glob(s: &str) -> Option<glob::Pattern> {
+    compile_glob(normalize_path(s))
+}
+
 fn path_matches(entry_path: &str, compiled: Option<&glob::Pattern>, target: &str) -> bool {
+    let target = normalize_path(target);
     match compiled {
         Some(g) => g.matches(target),
-        None => entry_path == target,
+        None => normalize_path(entry_path) == target,
     }
 }
 
@@ -292,13 +311,14 @@ impl Ignorelist {
         for e in file.ignored {
             validate_entry(&e)
                 .with_context(|| format!("invalid ignore entry in {}", path.display()))?;
-            let path_glob = e.path.as_deref().and_then(compile_glob);
+            let path_glob = e.path.as_deref().and_then(compile_path_glob);
             if e.kind.as_deref() == Some("file") {
                 if let Some(p) = &e.path {
                     match &path_glob {
                         Some(g) => out.whole_file_skips_glob.push(g.clone()),
                         None => {
-                            out.whole_file_skips_literal.insert(p.clone());
+                            out.whole_file_skips_literal
+                                .insert(normalize_path(p).to_string());
                         }
                     }
                 }
@@ -347,6 +367,7 @@ impl Ignorelist {
     }
 
     pub fn is_file_skipped(&self, file: &str) -> bool {
+        let file = normalize_path(file);
         if self.whole_file_skips_literal.contains(file) {
             return true;
         }
@@ -391,13 +412,14 @@ impl Ignorelist {
     }
 
     pub fn append(&mut self, entry: IgnoreEntry) {
-        let path_glob = entry.path.as_deref().and_then(compile_glob);
+        let path_glob = entry.path.as_deref().and_then(compile_path_glob);
         if entry.kind.as_deref() == Some("file") {
             if let Some(p) = &entry.path {
                 match &path_glob {
                     Some(g) => self.whole_file_skips_glob.push(g.clone()),
                     None => {
-                        self.whole_file_skips_literal.insert(p.clone());
+                        self.whole_file_skips_literal
+                            .insert(normalize_path(p).to_string());
                     }
                 }
             }
@@ -954,6 +976,54 @@ MAC_ADDRESS = true
         let list = with_entries(vec![entry]);
         assert!(list.is_ignored(&mk_finding("US_SSN", "123-45-6789", "x", 1)));
         assert!(!list.is_ignored(&mk_finding("US_SSN", "999-45-6789", "x", 1)));
+    }
+
+    #[test]
+    fn leading_dot_slash_is_normalized_on_both_sides() {
+        // Walker emits `./documentation/foo.md` when called with `.` as the
+        // root; user-written globs should not have to mirror that prefix.
+        // Either side may include `./` and matches still work.
+        let with_dot = IgnoreEntry {
+            entity_type: Some("CREDIT_CARD".into()),
+            path: Some("./documentation/**".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![with_dot]);
+        assert!(list.is_ignored(&mk_finding(
+            "CREDIT_CARD",
+            "4242",
+            "./documentation/api.md",
+            1,
+        )));
+        assert!(list.is_ignored(&mk_finding(
+            "CREDIT_CARD",
+            "4242",
+            "documentation/api.md",
+            1,
+        )));
+
+        let without_dot = IgnoreEntry {
+            entity_type: Some("CREDIT_CARD".into()),
+            path: Some("documentation/**".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![without_dot]);
+        assert!(list.is_ignored(&mk_finding(
+            "CREDIT_CARD",
+            "4242",
+            "./documentation/api.md",
+            1,
+        )));
+
+        // Whole-file skip: same normalization on both `path` and lookup.
+        let skip = IgnoreEntry {
+            kind: Some("file".into()),
+            path: Some("./vendor/bundle.js".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![skip]);
+        assert!(list.is_file_skipped("vendor/bundle.js"));
+        assert!(list.is_file_skipped("./vendor/bundle.js"));
     }
 
     #[test]

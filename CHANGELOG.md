@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.27] - 2026-04-17
+
+### Added
+
+- `--fix` TUI: new `c` key opens an editable line on the current
+  finding pre-seeded with its text. Type to edit, Tab toggles between
+  literal/glob (`text`) and regex (`match`), Enter saves the entry,
+  Esc cancels. Lets you write custom matchers without leaving the
+  triage loop.
+
+### Fixed
+
+- Path globs like `documentation/**` and `./documentation/**` now
+  match identically. The walker emits paths with a leading `./` when
+  invoked with `.` as the root, but the user-written pattern
+  shouldn't have to mirror that prefix. Both `path` (compare time)
+  and whole-file skips (storage + lookup) normalize away a single
+  leading `./` (or `.\`) on either side.
+- EMAIL_ADDRESS recognizer now drops matches whose local part contains
+  `{` or `}` (Python f-strings, JS template literals, mustache
+  templates, etc.). RFC 5321 technically allows curly braces in atext,
+  but real addresses never use them and the false-positive rate on
+  source code is high.
+
 ## [0.5.26] - 2026-04-17
 
 ### Added

@@ -111,11 +111,19 @@ impl Recognizer for EmailRecognizer {
             // Reject if the TLD is purely numeric (like `@1.8.1` in a GitHub
             // Actions pin `supercharge/redis-github-action@1.8.1`). Real TLDs
             // must contain a letter per RFC 1035.
-            if let Some((_local, domain)) = raw.rsplit_once('@') {
+            if let Some((local, domain)) = raw.rsplit_once('@') {
                 if let Some(tld) = domain.rsplit('.').next() {
                     if !tld.chars().any(|c| c.is_ascii_alphabetic()) {
                         continue;
                     }
+                }
+                // Reject template / interpolation syntax in the local part:
+                // f-strings (`f"foo_{user.id}@x"`), JS template literals
+                // (`${var}@x`), mustache (`{{var}}@x`), etc. RFC 5321 allows
+                // `{` and `}` in atext, but real addresses never use them
+                // and the false-positive rate on code is high.
+                if local.contains('{') || local.contains('}') {
+                    continue;
                 }
             }
             let (line_num, col_start, col_end, line_content) =
@@ -1022,6 +1030,22 @@ mod tests {
         let t = texts(r.analyze("f", "write to user@example.com or user.name+tag@sub.domain.co"));
         assert!(t.iter().any(|s| s == "user@example.com"));
         assert!(t.iter().any(|s| s == "user.name+tag@sub.domain.co"));
+    }
+
+    #[test]
+    fn email_rejects_template_interpolation_in_local_part() {
+        let r = EmailRecognizer::new();
+        // f-string (Python)
+        assert!(r
+            .analyze("f", r#"user.email = f"parked_{user.id}_{ts}@deactivated.internal""#)
+            .is_empty());
+        // JS template literal
+        assert!(r.analyze("f", "`${name}@example.com`").is_empty());
+        // Mustache / Handlebars
+        assert!(r.analyze("f", "{{user}}@example.com").is_empty());
+        // Real email on the same line still detected.
+        let t = texts(r.analyze("f", "real@example.com and parked_{x}@y.com"));
+        assert_eq!(t, vec!["real@example.com"]);
     }
 
     #[test]

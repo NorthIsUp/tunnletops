@@ -318,6 +318,12 @@ fn run_streaming_tui(
     let mut show_help = false;
     let mut accept_rest = false;
     let mut quit = false;
+    // Custom-entry input mode: `c` opens an editable line where the user
+    // types either a literal/glob (`text`) or a regex (`match`). Tab
+    // toggles which kind. Enter commits → IgnoreEntry; Esc cancels.
+    let mut input_open = false;
+    let mut input_buf = String::new();
+    let mut input_is_regex = false;
 
     loop {
         // Drain any findings that have arrived (non-blocking).
@@ -380,6 +386,9 @@ fn run_streaming_tui(
             scan_done,
             accept_rest,
             show_help,
+            input_open,
+            input_buf: &input_buf,
+            input_is_regex,
         };
         terminal.draw(|frame| render_state(frame, &state))?;
 
@@ -395,6 +404,49 @@ fn run_streaming_tui(
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             quit = true;
+            continue;
+        }
+        // Custom-entry editor takes over the keymap until Enter or Esc.
+        // Quit/scope-shortcut keys are intentionally inert here so the user
+        // can type freely (incl. `q`, `f`, etc. as part of a pattern).
+        if input_open {
+            match key.code {
+                KeyCode::Esc => {
+                    input_open = false;
+                    input_buf.clear();
+                    input_is_regex = false;
+                }
+                KeyCode::Tab | KeyCode::BackTab => input_is_regex = !input_is_regex,
+                KeyCode::Backspace => {
+                    input_buf.pop();
+                }
+                KeyCode::Enter => {
+                    if !input_buf.is_empty() && idx < queue.len() {
+                        let f = &queue[idx];
+                        let entry = if input_is_regex {
+                            IgnoreEntry {
+                                entity_type: Some(f.entity_type.clone()),
+                                regex: Some(input_buf.clone()),
+                                ..Default::default()
+                            }
+                        } else {
+                            IgnoreEntry {
+                                entity_type: Some(f.entity_type.clone()),
+                                text: Some(input_buf.clone()),
+                                ..Default::default()
+                            }
+                        };
+                        ignorelist.append(entry);
+                        added += 1;
+                        idx += 1;
+                    }
+                    input_open = false;
+                    input_buf.clear();
+                    input_is_regex = false;
+                }
+                KeyCode::Char(ch) => input_buf.push(ch),
+                _ => {}
+            }
             continue;
         }
         match key.code {
@@ -445,6 +497,17 @@ fn run_streaming_tui(
                     idx += 1;
                 }
             }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                // Open the custom-entry editor on the current finding. Pre-
+                // seeded with the finding's text so the user can edit a
+                // literal into a glob/regex without retyping. Defaults to
+                // text mode; Tab toggles to regex.
+                if idx < queue.len() {
+                    input_open = true;
+                    input_buf = queue[idx].text.clone();
+                    input_is_regex = false;
+                }
+            }
             _ => {}
         }
     }
@@ -460,6 +523,14 @@ fn run_streaming_tui(
 
 struct RenderState<'a> {
     current: Option<&'a Finding>,
+    /// True while the user is typing a custom matcher. The footer flips
+    /// from the keymap chips to a single-line input prompt.
+    input_open: bool,
+    /// In-progress text for the custom-entry editor (echoed to the user).
+    input_buf: &'a str,
+    /// Whether the current input is a regex (`match` field) vs a literal
+    /// (`text`). Tab toggles in the input loop.
+    input_is_regex: bool,
     // Context lines above the match (in file order). May be shorter than
     // `context_radius` when near the top of the file.
     context_above: &'a [String],
@@ -678,6 +749,45 @@ fn render_waiting(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderStat
 }
 
 fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState) {
+    if s.input_open {
+        let kind_label = if s.input_is_regex { "match (regex)" } else { "text (literal/glob)" };
+        let prompt = Line::from(vec![
+            Span::styled(
+                format!(" custom [{kind_label}] "),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                s.input_buf.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            // Block cursor caret so the user can see where typing lands.
+            Span::styled(
+                "█",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::SLOW_BLINK),
+            ),
+        ]);
+        let hint = Line::from(vec![
+            Span::styled(
+                " Enter ",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("save  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Tab ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("toggle text/regex  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Esc ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("cancel", Style::default().fg(Color::DarkGray)),
+        ]);
+        let footer = Paragraph::new(vec![prompt, hint])
+            .block(Block::default().borders(Borders::TOP));
+        frame.render_widget(footer, area);
+        return;
+    }
     let keys = if s.show_help {
         Line::from(vec![
             Span::styled("ignore ", Style::default().fg(Color::DarkGray)),
@@ -690,7 +800,9 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::raw("g "),
             Span::styled("globally  ", Style::default().fg(Color::DarkGray)),
             Span::raw("u "),
-            Span::styled("domain — *.host of URL finding (URL only)   ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("domain — *.host of URL finding (URL only)  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("c "),
+            Span::styled("custom text/regex — Tab toggles, Enter saves, Esc cancels   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("a "),
             Span::styled("all remaining   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("[ ] "),
@@ -721,6 +833,8 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             spans.push(Span::raw("  "));
             spans.push(key_chip("u", "domain (url)", Color::Cyan));
         }
+        spans.push(Span::raw("  "));
+        spans.push(key_chip("c", "ustom", Color::Cyan));
         spans.extend([
             Span::styled("   ·   ", Style::default().fg(Color::DarkGray)),
             key_chip("a", "ll", Color::Yellow),
