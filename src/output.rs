@@ -263,7 +263,7 @@ pub fn fix_interactive(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
-    let result = run_streaming_tui(&mut terminal, receiver, &mut ignorelist);
+    let result = run_streaming_tui(&mut terminal, receiver, &mut ignorelist, ignorelist_path);
 
     // Always restore the terminal, even if the TUI returned an error.
     disable_raw_mode().ok();
@@ -305,6 +305,7 @@ fn run_streaming_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     receiver: Receiver<FileOutcome>,
     ignorelist: &mut Ignorelist,
+    ignorelist_path: &str,
 ) -> Result<StreamOutcome> {
     let mut queue: Vec<Finding> = Vec::new();
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
@@ -508,6 +509,23 @@ fn run_streaming_tui(
                     input_is_regex = false;
                 }
             }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                // Reload phi.toml from disk and skip past any queued
+                // findings the new ignorelist now matches. Lets the user
+                // edit phi.toml in another terminal and re-check without
+                // restarting the scan. Reload errors silently keep the
+                // existing ignorelist (so a half-written file mid-edit
+                // doesn't blow up the TUI).
+                if let Ok(reloaded) = Ignorelist::load_or_empty(ignorelist_path) {
+                    *ignorelist = reloaded;
+                    while idx < queue.len()
+                        && (ignorelist.is_file_skipped(&queue[idx].file)
+                            || ignorelist.is_ignored(&queue[idx]))
+                    {
+                        idx += 1;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -619,8 +637,6 @@ fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding, s: &
     // Gutter width accommodates the highest line number we'll render.
     let max_ln = f.line_num as usize + s.context_below.len();
     let gutter_w = max_ln.to_string().len().max(3);
-    let pointer_pad = " ".repeat(gutter_w + 3 + col_start);
-
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
 
@@ -651,8 +667,22 @@ fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding, s: &
         Span::raw(after),
     ]));
 
+    // Marker rows use a `·` "continuation dot" in the gutter (instead of
+    // a line number + `│`) so the reader can tell at a glance that these
+    // aren't code lines. Matches the plain-format renderer above and the
+    // shape the user sketched (`. ` between code rows).
+    let marker_gutter = || {
+        Span::styled(
+            format!("{:>w$} · ", "", w = gutter_w),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let marker_offset = " ".repeat(col_start);
     lines.push(Line::from(vec![
-        Span::raw(pointer_pad.clone()),
+        marker_gutter(),
+        Span::raw(marker_offset.clone()),
         Span::styled(
             "▲",
             Style::default()
@@ -661,7 +691,8 @@ fn render_body(frame: &mut Frame, area: ratatui::layout::Rect, f: &Finding, s: &
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::raw(pointer_pad),
+        marker_gutter(),
+        Span::raw(marker_offset),
         Span::styled(
             format!("└── {} ", f.entity_type),
             Style::default()
@@ -802,7 +833,9 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
             Span::raw("u "),
             Span::styled("domain — *.host of URL finding (URL only)  ", Style::default().fg(Color::DarkGray)),
             Span::raw("c "),
-            Span::styled("custom text/regex — Tab toggles, Enter saves, Esc cancels   ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("custom text/regex — Tab toggles, Enter saves, Esc cancels  ", Style::default().fg(Color::DarkGray)),
+            Span::raw("r "),
+            Span::styled("reload phi.toml from disk + re-filter queue   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("a "),
             Span::styled("all remaining   ·  ", Style::default().fg(Color::DarkGray)),
             Span::raw("[ ] "),
@@ -835,6 +868,8 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, s: &RenderState
         }
         spans.push(Span::raw("  "));
         spans.push(key_chip("c", "ustom", Color::Cyan));
+        spans.push(Span::raw("  "));
+        spans.push(key_chip("r", "eload", Color::Magenta));
         spans.extend([
             Span::styled("   ·   ", Style::default().fg(Color::DarkGray)),
             key_chip("a", "ll", Color::Yellow),

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.28] - 2026-04-17
+
+### Added
+
+- `[entities]` accepts a float as a per-entity confidence floor:
+  `US_DRIVER_LICENSE = 0.85` keeps the entity enabled but drops
+  findings whose `score` is below 0.85. `true`/`false` still work
+  as before (enabled / disabled).
+- Email `text = "@*.host"` runs an anchored glob over the finding's
+  domain part. `text = "@*.local"` matches `user@svc.local` and
+  `demo@clara.local` but not `user@clara.com`. Plain `@host` (no
+  metachars) keeps the existing literal suffix behavior.
+- Per-entry `ignorecase` flag (default true). Set `ignorecase = false`
+  to require exact-case matching on `text` (literal + glob) and
+  `match` (regex). Per-entity wildcards stay always-insensitive
+  because email/URL casing is canonically insensitive.
+- `--fix` TUI: new `r` key reloads `phi.toml` from disk and skips
+  past any queued findings the new ignorelist now matches. Lets you
+  edit the config in another terminal and re-check without
+  restarting the scan. Half-written files mid-edit silently keep
+  the old ignorelist (no TUI crash).
+
+### Changed
+
+- `--fix` TUI body: marker rows (`▲` and `└── ENTITY (σ ...)`) now
+  render with a `·` continuation dot in the gutter instead of empty
+  whitespace, so it's visually clear those rows are finding metadata
+  rather than code.
+
 ## [0.5.27] - 2026-04-17
 
 ### Added

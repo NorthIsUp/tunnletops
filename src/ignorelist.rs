@@ -70,6 +70,12 @@ pub struct IgnoreEntry {
     /// Mutually exclusive with `match` on a single entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Case-insensitive matching (default true). Applies to literal `text`
+    /// compare, `text` glob, and `match` regex. Per-entity rules (email
+    /// `@host`, URL `*.host`) stay always-insensitive — those are
+    /// canonically case-insensitive per RFC convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignorecase: Option<bool>,
     /// Opt out of glob auto-detection on `text`. Default (unset / true)
     /// promotes a `text` containing `*`/`?`/`[` to an anchored glob; set
     /// to `false` to keep `text` strictly literal even when it looks
@@ -114,21 +120,37 @@ fn entities_is_empty(e: &EntitiesConfig) -> bool {
     e.flags.is_empty()
 }
 
-/// `[entities]` section — a flat `NAME = true|false` map. Entity types
-/// default to enabled; set to `false` to skip them entirely. Example:
+/// `[entities]` section — a flat map of entity-type → flag. Three forms:
 ///
 /// ```toml
 /// [entities]
-/// URL = false
-/// MAC_ADDRESS = false
+/// URL               = false   # disable this entity entirely
+/// MAC_ADDRESS       = true    # explicitly enable (the default)
+/// US_DRIVER_LICENSE = 0.85    # enable, drop findings with score < 0.85
 /// ```
 ///
-/// Case-sensitive — match the emitted `entity_type` exactly.
-/// `BTreeMap` so save-out is deterministically alphabetical.
+/// `true` and an absent key behave identically (default-enabled). A float
+/// is a per-entity confidence floor — useful for noisy NER outputs where
+/// you trust high-confidence hits but not the low-confidence tail.
+/// Case-sensitive: match the emitted `entity_type` exactly. `BTreeMap`
+/// so save-out is deterministically alphabetical.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntitiesConfig {
-    pub flags: std::collections::BTreeMap<String, bool>,
+    pub flags: std::collections::BTreeMap<String, EntityFlag>,
+}
+
+/// Per-entity flag value: enable / disable / minimum-confidence threshold.
+/// Untagged so TOML scalars (`true`, `false`, `0.85`) deserialize directly
+/// — no nested table required.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum EntityFlag {
+    /// `true` = enabled (no threshold), `false` = disabled.
+    Bool(bool),
+    /// Minimum acceptable score for findings of this entity (0.0..=1.0).
+    /// Findings with `score < threshold` are dropped during scan.
+    Threshold(f32),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,12 +161,18 @@ struct CompiledMatchers {
     /// `path` is a literal — a literal string compare is cheaper.
     path: Option<glob::Pattern>,
     /// Compiled glob for the `text` field when it contains glob metachars.
-    /// None means we'll fall through to literal/case-insensitive compare
-    /// plus per-entity wildcards (email `@host`, URL `*.host`).
+    /// Stored already-lowercased iff `case_insensitive` is true; matchers
+    /// lowercase the target accordingly. None means we'll fall through to
+    /// literal compare plus per-entity wildcards (email `@host`, URL
+    /// `*.host`).
     text: Option<glob::Pattern>,
     /// Parsed line range spec (for `line = "1,5,8..29"`-style values).
     /// None when `line` is unset; `Some(spec)` even for single-line entries.
     line: Option<LineSpec>,
+    /// Per-entry `ignorecase` (default true). Threaded into text-literal,
+    /// text-glob, and regex matching. Email/URL per-entity rules stay
+    /// always-insensitive regardless.
+    case_insensitive: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -156,7 +184,10 @@ pub struct Ignorelist {
     whole_file_skips_literal: HashSet<String>,
     /// Whole-file skip globs. Checked after `whole_file_skips_literal`.
     whole_file_skips_glob: Vec<glob::Pattern>,
-    disabled_entities: HashSet<String>,
+    /// Entity-level flags (disable + per-entity score thresholds). Built
+    /// from `[entities]`. Default behavior (entity not present) is "enabled,
+    /// no threshold", so we only need to record the explicit settings.
+    entity_flags: std::collections::HashMap<String, EntityFlag>,
 }
 
 /// One or more inclusive line ranges. `LineSpec::parse("1,5,8..29")` yields
@@ -323,21 +354,38 @@ impl Ignorelist {
                     }
                 }
             }
-            let regex = e.regex.as_ref().and_then(|p| match Regex::new(p) {
-                Ok(re) => Some(re),
-                Err(err) => {
-                    eprintln!(
-                        "warning: invalid `match` regex in {}: {} (skipping this ignore rule)",
-                        path.display(),
-                        err
-                    );
-                    None
+            // Case-insensitive by default; explicit `ignorecase = false`
+            // opts out. For regex we splice in `(?i)` (cheaper than wrapping
+            // every match site in case-folding logic).
+            let case_insensitive = e.ignorecase != Some(false);
+            let regex = e.regex.as_ref().and_then(|p| {
+                let p = if case_insensitive {
+                    format!("(?i){p}")
+                } else {
+                    p.clone()
+                };
+                match Regex::new(&p) {
+                    Ok(re) => Some(re),
+                    Err(err) => {
+                        eprintln!(
+                            "warning: invalid `match` regex in {}: {} (skipping this ignore rule)",
+                            path.display(),
+                            err
+                        );
+                        None
+                    }
                 }
             });
             let text_glob = if e.textglob == Some(false) {
                 None
             } else {
-                e.text.as_deref().and_then(compile_glob)
+                e.text.as_deref().and_then(|s| {
+                    if case_insensitive {
+                        compile_glob(&s.to_ascii_lowercase())
+                    } else {
+                        compile_glob(s)
+                    }
+                })
             };
             let line_spec = match e.line.as_deref() {
                 Some(s) => Some(LineSpec::parse(s).map_err(|m| {
@@ -351,19 +399,26 @@ impl Ignorelist {
                 path: path_glob,
                 text: text_glob,
                 line: line_spec,
+                case_insensitive,
             });
         }
-        out.disabled_entities = file
-            .entities
-            .flags
-            .into_iter()
-            .filter_map(|(k, enabled)| if !enabled { Some(k) } else { None })
-            .collect();
+        out.entity_flags = file.entities.flags.into_iter().collect();
         Ok(out)
     }
 
     pub fn is_entity_disabled(&self, entity_type: &str) -> bool {
-        self.disabled_entities.contains(entity_type)
+        matches!(self.entity_flags.get(entity_type), Some(EntityFlag::Bool(false)))
+    }
+
+    /// Apply both entity-level filters: drop if disabled, or if the
+    /// finding's score is below a configured per-entity threshold.
+    /// Findings that don't match any explicit `[entities]` entry pass.
+    pub fn passes_entity_filter(&self, f: &Finding) -> bool {
+        match self.entity_flags.get(&f.entity_type) {
+            Some(EntityFlag::Bool(false)) => false,
+            Some(EntityFlag::Threshold(t)) => f.score >= *t,
+            _ => true,
+        }
     }
 
     pub fn is_file_skipped(&self, file: &str) -> bool {
@@ -424,11 +479,25 @@ impl Ignorelist {
                 }
             }
         }
-        let regex = entry.regex.as_ref().and_then(|p| Regex::new(p).ok());
+        let case_insensitive = entry.ignorecase != Some(false);
+        let regex = entry.regex.as_ref().and_then(|p| {
+            let p = if case_insensitive {
+                format!("(?i){p}")
+            } else {
+                p.clone()
+            };
+            Regex::new(&p).ok()
+        });
         let text_glob = if entry.textglob == Some(false) {
             None
         } else {
-            entry.text.as_deref().and_then(compile_glob)
+            entry.text.as_deref().and_then(|s| {
+                if case_insensitive {
+                    compile_glob(&s.to_ascii_lowercase())
+                } else {
+                    compile_glob(s)
+                }
+            })
         };
         let line_spec = entry.line.as_deref().and_then(|s| LineSpec::parse(s).ok());
         self.entries.push(entry);
@@ -437,6 +506,7 @@ impl Ignorelist {
             path: path_glob,
             text: text_glob,
             line: line_spec,
+            case_insensitive,
         });
     }
 
@@ -467,11 +537,7 @@ impl Ignorelist {
         let file = IgnorelistFile {
             ignored,
             entities: EntitiesConfig {
-                flags: self
-                    .disabled_entities
-                    .iter()
-                    .map(|k| (k.clone(), false))
-                    .collect(),
+                flags: self.entity_flags.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             },
         };
         let text = toml::to_string_pretty(&file).context("serializing ignorelist")?;
@@ -556,20 +622,51 @@ fn matches_criteria(entry: &IgnoreEntry, c: &CompiledMatchers, f: &Finding) -> b
         return re.is_match(&f.text);
     }
     if let Some(g) = c.text.as_ref() {
-        // URL findings get the host-aware `*.host` semantics first; only
-        // if that doesn't match do we fall through to the generic glob over
-        // the full URL text. Lets `text = "*.metriport.com"` match
-        // `https://api.metriport.com/foo` (which a vanilla glob couldn't).
-        if f.entity_type == "URL" {
-            if let Some(t) = entry.text.as_deref() {
-                if url_wildcard_matches(t, &f.text) {
-                    return true;
-                }
+        // Per-entity host-aware wildcards run BEFORE the generic full-text
+        // glob — both `*.metriport.com` (URL) and `@*.local` (email) are
+        // really host-part patterns, not patterns over the entire finding.
+        // Without this branch, `@*.local` would fail to match
+        // `user@svc.local` because the glob is anchored over the full text.
+        if let Some(t) = entry.text.as_deref() {
+            if f.entity_type == "URL" && url_wildcard_matches(t, &f.text) {
+                return true;
+            }
+            if f.entity_type == "EMAIL_ADDRESS" && email_domain_glob_matches(t, &f.text) {
+                return true;
             }
         }
-        return g.matches(&f.text);
+        // The compiled glob is already lowercase iff case_insensitive, so
+        // we lowercase the target to match. Cheap on short finding texts.
+        let target = if c.case_insensitive {
+            f.text.to_ascii_lowercase()
+        } else {
+            f.text.clone()
+        };
+        return g.matches(&target);
     }
-    text_matches(entry, f)
+    text_matches(entry, c, f)
+}
+
+/// Match `@<host-pattern>` against an email's domain part. Strips the `@`,
+/// extracts the domain after the rightmost `@` in the finding, and runs an
+/// anchored glob over it. Returns false for non-`@`-prefixed patterns or
+/// non-glob hosts (those go through the existing literal suffix path in
+/// `text_matches`).
+fn email_domain_glob_matches(pattern: &str, finding_text: &str) -> bool {
+    let Some(host_pat) = pattern.strip_prefix('@') else {
+        return false;
+    };
+    if !host_pat.chars().any(|c| matches!(c, '*' | '?' | '[')) {
+        return false;
+    }
+    let Some((_, domain)) = finding_text.rsplit_once('@') else {
+        return false;
+    };
+    let host_pat = host_pat.to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    glob::Pattern::new(&host_pat)
+        .map(|g| g.matches(&domain))
+        .unwrap_or(false)
 }
 
 /// Pull the host out of a URL-ish string. Handles bare hosts (`github.com`),
@@ -619,18 +716,36 @@ fn url_wildcard_matches(pattern: &str, finding_text: &str) -> bool {
 /// - EMAIL_ADDRESS: leading `@` matches by domain, trailing `@` by username.
 /// - URL: `*.host` matches the apex host plus any subdomain (dot-boundary
 ///   suffix, so `notgithub.com` does not match `*.github.com`).
-fn text_matches(entry: &IgnoreEntry, f: &Finding) -> bool {
+fn text_matches(entry: &IgnoreEntry, c: &CompiledMatchers, f: &Finding) -> bool {
     let Some(txt) = entry.text.as_deref() else {
         return true;
     };
-    if txt.eq_ignore_ascii_case(&f.text) {
+    let literal_eq = if c.case_insensitive {
+        txt.eq_ignore_ascii_case(&f.text)
+    } else {
+        txt == f.text
+    };
+    if literal_eq {
         return true;
     }
     if f.entity_type == "EMAIL_ADDRESS" {
         let finding_lower = f.text.to_ascii_lowercase();
         let txt_lower = txt.to_ascii_lowercase();
-        if txt_lower.starts_with('@') && finding_lower.ends_with(&txt_lower) {
-            return true;
+        // `@<host>` matches by domain. If <host> contains glob metachars,
+        // run an anchored glob over the finding's domain part; otherwise
+        // fall back to the literal suffix match on the full email.
+        if let Some(host_pat) = txt_lower.strip_prefix('@') {
+            if let Some((_, domain)) = finding_lower.rsplit_once('@') {
+                if host_pat.chars().any(|c| matches!(c, '*' | '?' | '[')) {
+                    if let Ok(g) = glob::Pattern::new(host_pat) {
+                        if g.matches(domain) {
+                            return true;
+                        }
+                    }
+                } else if finding_lower.ends_with(&txt_lower) {
+                    return true;
+                }
+            }
         }
         if txt_lower.ends_with('@') && finding_lower.starts_with(&txt_lower) {
             return true;
@@ -698,6 +813,38 @@ mod tests {
         assert!(!list.is_ignored(&mk_finding(
             "EMAIL_ADDRESS",
             "user@other.com",
+            "x",
+            1
+        )));
+    }
+
+    #[test]
+    fn email_domain_glob_matches_subdomains() {
+        // `@*.local` is a domain glob. Should match any email whose
+        // domain matches `*.local` (apex via the trailing-dot suffix).
+        let entry = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("@*.local".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "hie.prescription.demo@clara.local",
+            "x",
+            1
+        )));
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "user@svc.clara.local",
+            "x",
+            1
+        )));
+        // Different TLD should not match.
+        assert!(!list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "user@clara.com",
             "x",
             1
         )));
@@ -903,6 +1050,107 @@ MAC_ADDRESS = true
         assert!(list.is_entity_disabled("URL"));
         assert!(!list.is_entity_disabled("MAC_ADDRESS"));
         assert!(!list.is_entity_disabled("EMAIL_ADDRESS"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ignorecase_default_is_insensitive_and_can_be_disabled() {
+        // Default (unset): case-insensitive literal compare.
+        let insens = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("admin@example.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![insens]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "Admin@Example.COM",
+            "x",
+            1
+        )));
+
+        // Explicit ignorecase = false: literal compare must match exactly.
+        let sens = IgnoreEntry {
+            entity_type: Some("EMAIL_ADDRESS".into()),
+            scope: Some("global".into()),
+            text: Some("admin@example.com".into()),
+            ignorecase: Some(false),
+            ..Default::default()
+        };
+        let list = with_entries(vec![sens]);
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "admin@example.com",
+            "x",
+            1
+        )));
+        assert!(!list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "Admin@Example.COM",
+            "x",
+            1
+        )));
+    }
+
+    #[test]
+    fn ignorecase_applies_to_glob_and_regex() {
+        // text glob respects ignorecase
+        let glob_sens = IgnoreEntry {
+            entity_type: Some("US_SSN".into()),
+            text: Some("ABC*".into()),
+            ignorecase: Some(false),
+            ..Default::default()
+        };
+        let list = with_entries(vec![glob_sens]);
+        assert!(list.is_ignored(&mk_finding("US_SSN", "ABC123", "x", 1)));
+        assert!(!list.is_ignored(&mk_finding("US_SSN", "abc123", "x", 1)));
+
+        // regex respects ignorecase (case-insensitive by default → matches both)
+        let re_insens = IgnoreEntry {
+            entity_type: Some("US_SSN".into()),
+            regex: Some("abc.*".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![re_insens]);
+        assert!(list.is_ignored(&mk_finding("US_SSN", "abc123", "x", 1)));
+        assert!(list.is_ignored(&mk_finding("US_SSN", "ABC123", "x", 1)));
+    }
+
+    #[test]
+    fn entities_threshold_filters_by_score() {
+        let text = r#"
+[entities]
+US_DRIVER_LICENSE = 0.85
+URL               = false
+PERSON            = true
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-thr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let list = Ignorelist::load_or_empty(&path).unwrap();
+
+        // Threshold: low-score finding dropped, high-score finding kept.
+        let low = Finding { score: 0.5, ..mk_finding("US_DRIVER_LICENSE", "X", "f", 1) };
+        let high = Finding { score: 0.9, ..mk_finding("US_DRIVER_LICENSE", "X", "f", 1) };
+        assert!(!list.passes_entity_filter(&low));
+        assert!(list.passes_entity_filter(&high));
+
+        // Bool(false) → always dropped, regardless of score.
+        let url = Finding { score: 1.0, ..mk_finding("URL", "https://x", "f", 1) };
+        assert!(!list.passes_entity_filter(&url));
+
+        // Bool(true) and unset entities → always pass (no threshold).
+        let person = Finding { score: 0.0, ..mk_finding("PERSON", "Alice", "f", 1) };
+        let unset = Finding { score: 0.0, ..mk_finding("EMAIL_ADDRESS", "a@b.com", "f", 1) };
+        assert!(list.passes_entity_filter(&person));
+        assert!(list.passes_entity_filter(&unset));
+
+        // is_entity_disabled stays restricted to Bool(false) — doesn't
+        // treat threshold-config'd entities as disabled.
+        assert!(list.is_entity_disabled("URL"));
+        assert!(!list.is_entity_disabled("US_DRIVER_LICENSE"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

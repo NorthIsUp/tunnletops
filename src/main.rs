@@ -50,9 +50,10 @@ fn resolve_ignorelist_path(cli_override: Option<&Path>) -> PathBuf {
 const CONFIG_HELP: &str = "\
 IGNORELIST FORMAT (.baselines/phi.toml):
 
-  [entities]               # disable an entity type entirely (case-sensitive)
-  ORGANIZATION = false
-  URL          = false
+  [entities]               # per-entity flags (case-sensitive entity name)
+  ORGANIZATION       = false   # disabled
+  URL                = true    # explicitly enabled (the default)
+  US_DRIVER_LICENSE  = 0.85    # enabled, drop findings with score < 0.85
 
   [[ignored]]              # whole-file skip (no scanning at all)
   type = \"file\"
@@ -87,11 +88,14 @@ IGNORELIST FORMAT (.baselines/phi.toml):
 MATCHERS (one per entry — `text` and `match` are mutually exclusive):
   text = \"...\"             literal compare; auto-promoted to glob if it
                           contains * ? or [. Per-entity rules layer on top
-                          (email @host, URL *.host).
+                          (email @host or @*.host, URL *.host).
   textglob = false         opt out of glob auto-detection — keep `text`
                           strictly literal even when it contains *. Useful
                           for matching paths/strings that genuinely contain
                           metachars (default true).
+  ignorecase = false       opt out of case-insensitive matching for `text`
+                          and `match` (default true). Per-entity wildcards
+                          stay always-insensitive regardless.
   match = '...'           regex over the full finding text (alias: pattern).
 
 GLOB METACHARS (path and text):
@@ -371,7 +375,7 @@ fn scan_one_file(
         .strict_iter()
         .filter(|r| !ignorelist.is_entity_disabled(r.entity_type()))
         .flat_map(|r| r.analyze(&file_str, &text))
-        .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
+        .filter(|f| ignorelist.passes_entity_filter(f))
         .filter(|f| {
             let keep = !ignorelist.is_ignored(f);
             if !keep {
@@ -420,7 +424,7 @@ fn scan_one_file(
         } else {
             ner.analyze_with_filter(&file_str, &text, Some(&tentative_lines))
                 .into_iter()
-                .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
+                .filter(|f| ignorelist.passes_entity_filter(f))
                 .filter(|f| {
                     let keep = !ignorelist.is_ignored(f);
                     if !keep {
@@ -479,7 +483,7 @@ fn scan_one_file(
         let ner_findings: Vec<Finding> = ner
             .analyze(&file_str, &text)
             .into_iter()
-            .filter(|f| !ignorelist.is_entity_disabled(&f.entity_type))
+            .filter(|f| ignorelist.passes_entity_filter(f))
             .filter(|f| {
                 let keep = !ignorelist.is_ignored(f);
                 if !keep {
