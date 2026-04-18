@@ -56,32 +56,52 @@ IGNORELIST FORMAT (.baselines/phi.toml):
 
   [[ignored]]              # whole-file skip (no scanning at all)
   type = \"file\"
-  path = \"vendor/**\"       # literal path or shell glob
+  path = \"vendor/**\"       # path supports * ? [...] **
 
-  [[ignored]]              # ignore one specific finding
+  [[ignored]]              # literal text match (case-insensitive)
   entity_type = \"EMAIL_ADDRESS\"
   text        = \"admin@example.com\"
 
-  [[ignored]]              # email wildcards: leading @ matches by domain,
-  entity_type = \"EMAIL_ADDRESS\"   # trailing @ matches by username
+  [[ignored]]              # text glob — auto-detected by metachars in `text`
+  entity_type = \"US_SSN\"
+  text        = \"123-45-*\"  # anchored: must match the whole finding text
+
+  [[ignored]]              # email wildcard: leading @ → by domain,
+  entity_type = \"EMAIL_ADDRESS\"   # trailing @ → by username
   text        = \"@askclara.com\"
 
-  [[ignored]]              # URL wildcards: *.host matches apex + subdomains
-  entity_type = \"URL\"
+  [[ignored]]              # URL wildcard: *.host matches apex + subdomains
+  entity_type = \"URL\"     # (host-aware, not a generic full-text glob)
   text        = \"*.metriport.com\"
 
   [[ignored]]              # regex match (literal TOML string avoids escaping)
-  entity_type = \"EMAIL_ADDRESS\"
-  pattern     = '@\\w+\\.askclara\\.com'
+  entity_type = \"EMAIL_ADDRESS\"   # `pattern` is a silent alias for `match`
+  match       = '@\\w+\\.askclara\\.com'
+
+  [[ignored]]              # line ranges: comma list + inclusive a..b ranges
+  entity_type = \"URL\"
+  path        = \"docs/api.md\"
+  line        = \"1,5,8..29\"
+  text        = \"https://example.com\"
+
+MATCHERS (one per entry — `text` and `match` are mutually exclusive):
+  text = \"...\"             literal compare; auto-promoted to glob if it
+                          contains * ? or [. Per-entity rules layer on top
+                          (email @host, URL *.host).
+  match = '...'           regex over the full finding text (alias: pattern).
+
+GLOB METACHARS (path and text):
+  *  ?  [...]              shell-style; * matches any chars, ? matches one
+  **                       cross-segment match (e.g. \"docs/**/*.md\")
+
+LINE RANGES (line scope):
+  line = \"5\"               just line 5
+  line = \"1,5,8..29\"       lines 1, 5, and 8 through 29 (inclusive)
 
 SCOPE INFERENCE (no need to write `scope = \"...\"` explicitly):
-  line set         → line scope   (matches one finding on one line)
+  line set         → line scope   (matches one finding on one line / range)
   path set, no line → file scope  (matches anywhere in path / glob)
   neither          → global scope (matches across the whole repo)
-
-PATH GLOBS:
-  *  ?  [...]      shell-style metachars
-  **               recursive directory match (e.g. \"docs/**/*.md\")
 
 Unknown top-level keys or fields error loudly — typos won't be silently
 ignored. Use `tunneltops format` to re-sort an ignorelist deterministically.

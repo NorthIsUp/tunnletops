@@ -29,7 +29,7 @@ pub struct IgnoreEntry {
     // Field order here is the TOML serialization order. We put the "what
     // kind of entry is this?" fields first (type for whole-file skips;
     // entity_type for regular), then narrowing scope/path/line, then the
-    // matcher (text / pattern). Makes each [[ignored]] block's first
+    // matchers (text / glob / match). Makes each [[ignored]] block's first
     // visible line tell you what it's about.
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -39,26 +39,54 @@ pub struct IgnoreEntry {
     pub scope: Option<String>,
     /// File path or glob pattern. `file` is accepted as an alias for
     /// backward compatibility with ignorelists written before 0.5.21;
-    /// `save()` always writes `path`.
+    /// `save()` always writes `path`. Supports `*`, `?`, `[...]`, and
+    /// `**` for recursive directory match.
     #[serde(
         default,
         alias = "file",
         skip_serializing_if = "Option::is_none"
     )]
     pub path: Option<String>,
+    /// Lines this rule applies to (line scope). Accepts a single number,
+    /// a comma list, or inclusive `start..end` ranges. Examples:
+    /// `line = "5"`, `line = "1,5,8..29"`. Range bounds are inclusive
+    /// on both ends — `8..29` matches lines 8 through 29.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
+    /// Text matcher (case-insensitive). Auto-detects shape:
+    ///
+    /// - Contains glob metachars (`*`, `?`, `[`) → anchored glob over the
+    ///   finding's full text. `**` matches across segments.
+    /// - No metachars → literal exact compare.
+    ///
+    /// Per-entity wildcards layer on top of literal compare:
+    /// - EMAIL_ADDRESS: leading `@` matches by domain, trailing `@` by
+    ///   username (e.g. `text = "@askclara.com"`).
+    /// - URL: `text = "*.host"` is host-aware (apex + every subdomain),
+    ///   not a generic full-text glob — so `*.metriport.com` matches
+    ///   `https://api.metriport.com/foo` even though the URL doesn't
+    ///   end in `.metriport.com`.
+    ///
+    /// Mutually exclusive with `match` on a single entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Optional regex applied to the finding's text. When set, takes
-    /// precedence over `text`. Use TOML literal strings (single quotes)
-    /// to avoid double-escaping backslashes:
+    /// Regex over the finding's full text. `pattern` is accepted as a
+    /// silent alias for backward compatibility; `save()` writes `match`.
+    /// Use TOML literal strings (single quotes) to avoid double-escaping
+    /// backslashes:
     ///
     /// ```toml
-    /// pattern = '@\w+\.askclara\.com'
+    /// match = '@\w+\.askclara\.com'
     /// ```
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
+    ///
+    /// Mutually exclusive with `text` and `glob`.
+    #[serde(
+        default,
+        rename = "match",
+        alias = "pattern",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub regex: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,18 +124,78 @@ pub struct EntitiesConfig {
 }
 
 #[derive(Debug, Clone, Default)]
+struct CompiledMatchers {
+    /// Compiled regex for the `match` (a.k.a. `pattern`) field.
+    regex: Option<Regex>,
+    /// Compiled glob for the `path` field (file/directory match). None when
+    /// `path` is a literal — a literal string compare is cheaper.
+    path: Option<glob::Pattern>,
+    /// Compiled glob for the `text` field when it contains glob metachars.
+    /// None means we'll fall through to literal/case-insensitive compare
+    /// plus per-entity wildcards (email `@host`, URL `*.host`).
+    text: Option<glob::Pattern>,
+    /// Parsed line range spec (for `line = "1,5,8..29"`-style values).
+    /// None when `line` is unset; `Some(spec)` even for single-line entries.
+    line: Option<LineSpec>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Ignorelist {
     entries: Vec<IgnoreEntry>,
-    /// Parallel to `entries`: compiled regex for entries with `pattern` set.
-    compiled_patterns: Vec<Option<Regex>>,
-    /// Parallel to `entries`: compiled glob for the `path` field when it
-    /// contains glob metachars. None = literal string compare.
-    compiled_paths: Vec<Option<glob::Pattern>>,
+    /// Parallel to `entries`: compiled matchers for each entry.
+    compiled: Vec<CompiledMatchers>,
     /// Fast-path for whole-file skips: exact literal paths.
     whole_file_skips_literal: HashSet<String>,
     /// Whole-file skip globs. Checked after `whole_file_skips_literal`.
     whole_file_skips_glob: Vec<glob::Pattern>,
     disabled_entities: HashSet<String>,
+}
+
+/// One or more inclusive line ranges. `LineSpec::parse("1,5,8..29")` yields
+/// the set `{1, 5, 8..=29}`. Single-number entries are stored as `(n, n)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineSpec {
+    /// Inclusive (start, end) intervals. Order is preserved from the input
+    /// string; we don't normalize / merge / sort because the typical entry
+    /// has 1-3 ranges and `contains` is linear either way.
+    intervals: Vec<(u32, u32)>,
+}
+
+impl LineSpec {
+    pub fn parse(s: &str) -> std::result::Result<Self, String> {
+        let mut intervals = Vec::new();
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Some((a, b)) = part.split_once("..") {
+                let a: u32 = a.trim().parse().map_err(|_| {
+                    format!("invalid line range start `{}` in `{}`", a.trim(), s)
+                })?;
+                let b: u32 = b.trim().parse().map_err(|_| {
+                    format!("invalid line range end `{}` in `{}`", b.trim(), s)
+                })?;
+                if a > b {
+                    return Err(format!("line range start > end in `{}`", part));
+                }
+                intervals.push((a, b));
+            } else {
+                let n: u32 = part
+                    .parse()
+                    .map_err(|_| format!("invalid line number `{}` in `{}`", part, s))?;
+                intervals.push((n, n));
+            }
+        }
+        if intervals.is_empty() {
+            return Err(format!("empty line spec `{}`", s));
+        }
+        Ok(Self { intervals })
+    }
+
+    pub fn contains(&self, n: u32) -> bool {
+        self.intervals.iter().any(|&(a, b)| a <= n && n <= b)
+    }
 }
 
 /// Effective scope for an entry, derived from what fields are set.
@@ -144,11 +232,12 @@ fn effective_scope(e: &IgnoreEntry) -> Scope {
     }
 }
 
-/// Compile `p` as a glob iff it contains glob metachars; otherwise None
-/// (we'll fall back to literal string compare, which is cheaper).
-fn compile_path(p: &str) -> Option<glob::Pattern> {
-    if p.chars().any(|c| matches!(c, '*' | '?' | '[')) {
-        glob::Pattern::new(p).ok()
+/// Compile `s` as a glob iff it contains glob metachars; otherwise None
+/// (we'll fall back to literal string compare, which is cheaper). Used for
+/// both `path` and `text` fields — same metachar semantics in both places.
+fn compile_glob(s: &str) -> Option<glob::Pattern> {
+    if s.chars().any(|c| matches!(c, '*' | '?' | '[')) {
+        glob::Pattern::new(s).ok()
     } else {
         None
     }
@@ -159,6 +248,18 @@ fn path_matches(entry_path: &str, compiled: Option<&glob::Pattern>, target: &str
         Some(g) => g.matches(target),
         None => entry_path == target,
     }
+}
+
+/// Reject entries that set more than one of `text` / `match` — they're
+/// alternative matchers, never both. Returns the offending field name pair
+/// in the error so the user can find which `[[ignored]]` block to fix.
+fn validate_entry(entry: &IgnoreEntry) -> Result<()> {
+    if entry.text.is_some() && entry.regex.is_some() {
+        anyhow::bail!(
+            "ignore entry sets both `text` and `match` (or `pattern`) — pick one"
+        );
+    }
+    Ok(())
 }
 
 impl Ignorelist {
@@ -181,7 +282,9 @@ impl Ignorelist {
         };
         let mut out = Self::default();
         for e in file.ignored {
-            let path_glob = e.path.as_deref().and_then(compile_path);
+            validate_entry(&e)
+                .with_context(|| format!("invalid ignore entry in {}", path.display()))?;
+            let path_glob = e.path.as_deref().and_then(compile_glob);
             if e.kind.as_deref() == Some("file") {
                 if let Some(p) = &e.path {
                     match &path_glob {
@@ -192,20 +295,31 @@ impl Ignorelist {
                     }
                 }
             }
-            let compiled = e.pattern.as_ref().and_then(|p| match Regex::new(p) {
+            let regex = e.regex.as_ref().and_then(|p| match Regex::new(p) {
                 Ok(re) => Some(re),
                 Err(err) => {
                     eprintln!(
-                        "warning: invalid pattern in {}: {} (skipping this ignore rule)",
+                        "warning: invalid `match` regex in {}: {} (skipping this ignore rule)",
                         path.display(),
                         err
                     );
                     None
                 }
             });
+            let text_glob = e.text.as_deref().and_then(compile_glob);
+            let line_spec = match e.line.as_deref() {
+                Some(s) => Some(LineSpec::parse(s).map_err(|m| {
+                    anyhow::anyhow!("invalid `line` in {}: {}", path.display(), m)
+                })?),
+                None => None,
+            };
             out.entries.push(e);
-            out.compiled_patterns.push(compiled);
-            out.compiled_paths.push(path_glob);
+            out.compiled.push(CompiledMatchers {
+                regex,
+                path: path_glob,
+                text: text_glob,
+                line: line_spec,
+            });
         }
         out.disabled_entities = file
             .entities
@@ -228,12 +342,7 @@ impl Ignorelist {
     }
 
     pub fn is_ignored(&self, f: &Finding) -> bool {
-        for ((entry, pat), path_glob) in self
-            .entries
-            .iter()
-            .zip(self.compiled_patterns.iter())
-            .zip(self.compiled_paths.iter())
-        {
+        for (entry, c) in self.entries.iter().zip(self.compiled.iter()) {
             if entry.kind.as_deref() == Some("file") {
                 // Handled via `is_file_skipped`; don't double-match.
                 continue;
@@ -243,17 +352,17 @@ impl Ignorelist {
                     continue;
                 }
             }
-            if !matches_criteria(entry, pat.as_ref(), f) {
+            if !matches_criteria(entry, c, f) {
                 continue;
             }
             let file_ok = || match entry.path.as_deref() {
-                Some(p) => path_matches(p, path_glob.as_ref(), &f.file),
+                Some(p) => path_matches(p, c.path.as_ref(), &f.file),
                 None => false,
             };
             match effective_scope(entry) {
                 Scope::Line => {
                     if file_ok()
-                        && entry.line.as_deref() == Some(f.line_num.to_string().as_str())
+                        && c.line.as_ref().map(|s| s.contains(f.line_num)).unwrap_or(false)
                     {
                         return true;
                     }
@@ -270,7 +379,7 @@ impl Ignorelist {
     }
 
     pub fn append(&mut self, entry: IgnoreEntry) {
-        let path_glob = entry.path.as_deref().and_then(compile_path);
+        let path_glob = entry.path.as_deref().and_then(compile_glob);
         if entry.kind.as_deref() == Some("file") {
             if let Some(p) = &entry.path {
                 match &path_glob {
@@ -281,10 +390,16 @@ impl Ignorelist {
                 }
             }
         }
-        let compiled = entry.pattern.as_ref().and_then(|p| Regex::new(p).ok());
+        let regex = entry.regex.as_ref().and_then(|p| Regex::new(p).ok());
+        let text_glob = entry.text.as_deref().and_then(compile_glob);
+        let line_spec = entry.line.as_deref().and_then(|s| LineSpec::parse(s).ok());
         self.entries.push(entry);
-        self.compiled_patterns.push(compiled);
-        self.compiled_paths.push(path_glob);
+        self.compiled.push(CompiledMatchers {
+            regex,
+            path: path_glob,
+            text: text_glob,
+            line: line_spec,
+        });
     }
 
     #[allow(dead_code)]
@@ -387,7 +502,7 @@ fn sort_key(e: &IgnoreEntry) -> (u8, String, u8, String, String) {
     };
     let path = e.path.clone().unwrap_or_default();
     let text = e
-        .pattern
+        .regex
         .clone()
         .or_else(|| e.text.clone())
         .unwrap_or_default();
@@ -395,10 +510,26 @@ fn sort_key(e: &IgnoreEntry) -> (u8, String, u8, String, String) {
 }
 
 /// Return `true` if this ignore entry's match criteria apply to the finding.
-/// `pattern` (precompiled regex) takes precedence over `text` when set.
-fn matches_criteria(entry: &IgnoreEntry, compiled: Option<&Regex>, f: &Finding) -> bool {
-    if let Some(re) = compiled {
+/// Precedence: `match` regex > `text` glob > `text` literal+per-entity rules.
+/// (Mutual exclusion is enforced at load time, so `text` and `match` are
+/// never both set on a single entry.)
+fn matches_criteria(entry: &IgnoreEntry, c: &CompiledMatchers, f: &Finding) -> bool {
+    if let Some(re) = c.regex.as_ref() {
         return re.is_match(&f.text);
+    }
+    if let Some(g) = c.text.as_ref() {
+        // URL findings get the host-aware `*.host` semantics first; only
+        // if that doesn't match do we fall through to the generic glob over
+        // the full URL text. Lets `text = "*.metriport.com"` match
+        // `https://api.metriport.com/foo` (which a vanilla glob couldn't).
+        if f.entity_type == "URL" {
+            if let Some(t) = entry.text.as_deref() {
+                if url_wildcard_matches(t, &f.text) {
+                    return true;
+                }
+            }
+        }
+        return g.matches(&f.text);
     }
     text_matches(entry, f)
 }
@@ -556,7 +687,7 @@ mod tests {
         let entry = IgnoreEntry {
             entity_type: Some("EMAIL_ADDRESS".into()),
             scope: Some("global".into()),
-            pattern: Some(r"@\w+\.askclara\.com$".into()),
+            regex: Some(r"@\w+\.askclara\.com$".into()),
             ..Default::default()
         };
         let list = with_entries(vec![entry]);
@@ -747,6 +878,122 @@ MAC_ADDRESS = true
         // Returned host is normalized to lowercase.
         assert_eq!(extract_url_host("HTTPS://Example.COM/").as_deref(), Some("example.com"));
         assert_eq!(extract_url_host(""), None);
+    }
+
+    #[test]
+    fn line_spec_parses_singletons_lists_and_ranges() {
+        let s = LineSpec::parse("1,5,8..29").unwrap();
+        assert!(s.contains(1));
+        assert!(!s.contains(2));
+        assert!(s.contains(5));
+        assert!(!s.contains(6));
+        assert!(s.contains(8));
+        assert!(s.contains(15));
+        assert!(s.contains(29)); // inclusive end
+        assert!(!s.contains(30));
+
+        let single = LineSpec::parse("42").unwrap();
+        assert!(single.contains(42));
+        assert!(!single.contains(41));
+
+        // Whitespace around bits is fine.
+        let spaced = LineSpec::parse(" 1 , 3..5 , 9 ").unwrap();
+        assert!(spaced.contains(4));
+    }
+
+    #[test]
+    fn line_spec_rejects_garbage() {
+        assert!(LineSpec::parse("abc").is_err());
+        assert!(LineSpec::parse("5..3").is_err()); // start > end
+        assert!(LineSpec::parse("").is_err()); // empty after trim
+        assert!(LineSpec::parse("5..").is_err()); // missing end
+    }
+
+    #[test]
+    fn line_range_in_ignore_entry() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            path: Some("docs/api.md".into()),
+            line: Some("8..12,20".into()),
+            text: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("URL", "https://example.com", "docs/api.md", 8)));
+        assert!(list.is_ignored(&mk_finding("URL", "https://example.com", "docs/api.md", 12)));
+        assert!(list.is_ignored(&mk_finding("URL", "https://example.com", "docs/api.md", 20)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://example.com", "docs/api.md", 7)));
+        assert!(!list.is_ignored(&mk_finding("URL", "https://example.com", "docs/api.md", 13)));
+    }
+
+    #[test]
+    fn text_glob_matches_full_finding_text() {
+        // Anchored: must match the whole finding text.
+        let entry = IgnoreEntry {
+            entity_type: Some("US_SSN".into()),
+            scope: Some("global".into()),
+            text: Some("123-45-*".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding("US_SSN", "123-45-6789", "x", 1)));
+        assert!(!list.is_ignored(&mk_finding("US_SSN", "999-45-6789", "x", 1)));
+    }
+
+    #[test]
+    fn text_glob_double_star_crosses_segments() {
+        let entry = IgnoreEntry {
+            entity_type: Some("URL".into()),
+            text: Some("**/internal/**".into()),
+            ..Default::default()
+        };
+        let list = with_entries(vec![entry]);
+        assert!(list.is_ignored(&mk_finding(
+            "URL",
+            "https://x.com/foo/bar/internal/y/z",
+            "f",
+            1
+        )));
+    }
+
+    #[test]
+    fn pattern_field_is_alias_for_match() {
+        // Existing files using `pattern = "..."` continue to load.
+        let text = r#"
+[[ignored]]
+entity_type = "EMAIL_ADDRESS"
+pattern     = '@staging\.askclara\.com$'
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-pat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let list = Ignorelist::load_or_empty(&path).unwrap();
+        assert!(list.is_ignored(&mk_finding(
+            "EMAIL_ADDRESS",
+            "user@staging.askclara.com",
+            "f",
+            1
+        )));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mutually_exclusive_text_and_match_errors() {
+        let text = r#"
+[[ignored]]
+entity_type = "URL"
+text  = "foo"
+match = "bar"
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-excl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let err = Ignorelist::load_or_empty(&path).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("text") && msg.contains("match"), "got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

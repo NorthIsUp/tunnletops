@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.25] - 2026-04-17
+
+### Added
+
+- `text` field is now glob-aware: if it contains `*`, `?`, or `[`, it
+  compiles as an anchored shell glob over the finding's full text
+  (`**` crosses segments). Bare strings stay literal compares —
+  existing entries unchanged. Per-entity wildcards (email `@host`,
+  URL `*.host`) still apply on the literal/host-aware path.
+- `match` field for full regex over the finding text. `pattern` is
+  kept as a silent alias; `save()` writes `match`. `text` and `match`
+  are mutually exclusive on a single entry — load errors loudly if
+  both are set.
+- `line` accepts comma lists and inclusive `start..end` ranges:
+  `line = "5"`, `line = "1,5,8..29"`. Range bounds inclusive on both
+  ends.
+- `--help` IGNORELIST FORMAT section expanded to document all three
+  matchers (`text` literal/glob, `match` regex), the `**` glob, the
+  line-range syntax, and matcher mutual exclusion.
+
+### Changed
+
+- Internal: parallel `compiled_patterns` / `compiled_paths` vecs
+  collapsed into one `CompiledMatchers` struct per entry. No external
+  behavior change beyond the additions above.
+
 ## [0.5.24] - 2026-04-17
 
 ### Added
