@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.24] - 2026-04-17
+
+### Added
+
+- `--help` now ends with an IGNORELIST FORMAT section that documents
+  the `phi.toml` schema (entity disables, scope inference, path globs,
+  email/URL wildcards, and regex patterns) so users don't have to read
+  the source to learn the config surface.
+
+### Changed
+
+- `phi.toml` now rejects unknown top-level keys and unknown fields on
+  `[[ignored]]` entries (`#[serde(deny_unknown_fields)]`). Typos like
+  `[enabled]` (vs `[entities]`) used to be silently dropped, leaving
+  disable rules unenforced. Existing files using only the documented
+  schema (including the `file` → `path` alias) keep loading unchanged.
+
 ## [0.5.23] - 2026-04-17
 
 ### Added

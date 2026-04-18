@@ -24,6 +24,7 @@ use crate::finding::Finding;
 /// path = "vendor/bundle.js"      # exact match (no glob chars)
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IgnoreEntry {
     // Field order here is the TOML serialization order. We put the "what
     // kind of entry is this?" fields first (type for whole-file skips;
@@ -61,6 +62,7 @@ pub struct IgnoreEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IgnorelistFile {
     /// Per-project enable/disable of entity types. Declared first so it
     /// serializes above `[[ignored]]` blocks — TOML serializes struct
@@ -745,6 +747,26 @@ MAC_ADDRESS = true
         // Returned host is normalized to lowercase.
         assert_eq!(extract_url_host("HTTPS://Example.COM/").as_deref(), Some("example.com"));
         assert_eq!(extract_url_host(""), None);
+    }
+
+    #[test]
+    fn unknown_top_level_key_errors_loudly() {
+        // Regression: `[enabled]` (vs the real `[entities]`) used to be
+        // silently dropped, leaving disable-rules unenforced. With
+        // `deny_unknown_fields`, the load returns an error pinpointing
+        // the offending key.
+        let text = r#"
+[enabled]
+ORGANIZATION = false
+"#;
+        let dir = std::env::temp_dir().join(format!("ttops-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phi.toml");
+        std::fs::write(&path, text).unwrap();
+        let err = Ignorelist::load_or_empty(&path).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("enabled"), "error should mention the bad key, got: {msg}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

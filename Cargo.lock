@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "tunneltops"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "aho-corasick",
  "anyhow",

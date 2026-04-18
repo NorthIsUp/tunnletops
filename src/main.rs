@@ -47,8 +47,53 @@ fn resolve_ignorelist_path(cli_override: Option<&Path>) -> PathBuf {
     toml
 }
 
+const CONFIG_HELP: &str = "\
+IGNORELIST FORMAT (.baselines/phi.toml):
+
+  [entities]               # disable an entity type entirely (case-sensitive)
+  ORGANIZATION = false
+  URL          = false
+
+  [[ignored]]              # whole-file skip (no scanning at all)
+  type = \"file\"
+  path = \"vendor/**\"       # literal path or shell glob
+
+  [[ignored]]              # ignore one specific finding
+  entity_type = \"EMAIL_ADDRESS\"
+  text        = \"admin@example.com\"
+
+  [[ignored]]              # email wildcards: leading @ matches by domain,
+  entity_type = \"EMAIL_ADDRESS\"   # trailing @ matches by username
+  text        = \"@askclara.com\"
+
+  [[ignored]]              # URL wildcards: *.host matches apex + subdomains
+  entity_type = \"URL\"
+  text        = \"*.metriport.com\"
+
+  [[ignored]]              # regex match (literal TOML string avoids escaping)
+  entity_type = \"EMAIL_ADDRESS\"
+  pattern     = '@\\w+\\.askclara\\.com'
+
+SCOPE INFERENCE (no need to write `scope = \"...\"` explicitly):
+  line set         → line scope   (matches one finding on one line)
+  path set, no line → file scope  (matches anywhere in path / glob)
+  neither          → global scope (matches across the whole repo)
+
+PATH GLOBS:
+  *  ?  [...]      shell-style metachars
+  **               recursive directory match (e.g. \"docs/**/*.md\")
+
+Unknown top-level keys or fields error loudly — typos won't be silently
+ignored. Use `tunneltops format` to re-sort an ignorelist deterministically.
+";
+
 #[derive(Parser)]
-#[command(name = "tunneltops", version, about = "Fast PHI/PII scanner")]
+#[command(
+    name = "tunneltops",
+    version,
+    about = "Fast PHI/PII scanner",
+    after_long_help = CONFIG_HELP,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
