@@ -5,6 +5,7 @@ mod ner;
 mod output;
 mod pool;
 mod recognizer;
+mod secrets;
 mod walker;
 
 use std::path::{Path, PathBuf};
@@ -371,7 +372,7 @@ fn scan_one_file(
     // Also filter emitted findings by entity_type (recognizers like
     // PhoneRecognizer emit US_PHONE / INTL_PHONE — disabling one doesn't
     // disable the whole recognizer).
-    let strict: Vec<Finding> = recognizers
+    let mut strict: Vec<Finding> = recognizers
         .strict_iter()
         .filter(|r| !ignorelist.is_entity_disabled(r.entity_type()))
         .flat_map(|r| r.analyze(&file_str, &text))
@@ -387,6 +388,28 @@ fn scan_one_file(
             keep
         })
         .collect();
+
+    // Opt-in recognizers (low-precision secret heuristics). Only run when the
+    // user has explicitly enabled their entity type via `[entities] NAME = true`
+    // or `NAME = <threshold>`. An absent entry keeps them off — these detectors
+    // are too noisy to run by default.
+    let opt_in: Vec<Finding> = recognizers
+        .opt_in_iter()
+        .filter(|r| ignorelist.is_entity_explicitly_enabled(r.entity_type()))
+        .flat_map(|r| r.analyze(&file_str, &text))
+        .filter(|f| ignorelist.passes_entity_filter(f))
+        .filter(|f| {
+            let keep = !ignorelist.is_ignored(f);
+            if !keep {
+                ignored_count += 1;
+            }
+            if verbose {
+                log_candidate("opt_in", f, if keep { "kept" } else { "ignored" });
+            }
+            keep
+        })
+        .collect();
+    strict.extend(opt_in);
 
     let findings = if model.is_hybrid() {
         // Hybrid: broad regex produces candidates; NER acts as a pure validator.

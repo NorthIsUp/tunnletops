@@ -410,6 +410,18 @@ impl Ignorelist {
         matches!(self.entity_flags.get(entity_type), Some(EntityFlag::Bool(false)))
     }
 
+    /// True if the user has explicitly opted this entity type in via
+    /// `[entities] NAME = true` or `[entities] NAME = <threshold>`. Absent
+    /// entries do NOT count as explicit enablement — that's the whole point
+    /// of opt-in detectors. Used to gate the `opt_in` recognizer tier, which
+    /// is noisy enough that default-on would flame every scan.
+    pub fn is_entity_explicitly_enabled(&self, entity_type: &str) -> bool {
+        matches!(
+            self.entity_flags.get(entity_type),
+            Some(EntityFlag::Bool(true)) | Some(EntityFlag::Threshold(_))
+        )
+    }
+
     /// Apply both entity-level filters: drop if disabled, or if the
     /// finding's score is below a configured per-entity threshold.
     /// Findings that don't match any explicit `[entities]` entry pass.

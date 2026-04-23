@@ -21,27 +21,41 @@ pub trait Recognizer: Send + Sync {
 pub struct RecognizerSet {
     strict: Vec<Box<dyn Recognizer>>,
     broad: Vec<Box<dyn Recognizer>>,
+    /// Opt-in recognizers — only run when their entity type is explicitly
+    /// enabled in `[entities]` (`NAME = true` or `NAME = <threshold>`).
+    /// Default-off because these detectors (entropy / keyword) have high
+    /// false-positive rates without per-project tuning.
+    opt_in: Vec<Box<dyn Recognizer>>,
 }
 
 impl RecognizerSet {
     pub fn default_set() -> Self {
+        let mut strict: Vec<Box<dyn Recognizer>> = vec![
+            Box::new(EmailRecognizer::new()),
+            Box::new(CreditCardRecognizer::new()),
+            Box::new(PhoneRecognizer::new()),
+            Box::new(UsSsnRecognizer::new()),
+            Box::new(IpV4Recognizer::new()),
+            Box::new(IpV6Recognizer::new()),
+            Box::new(UrlRecognizer::new()),
+            Box::new(MacRecognizer::new()),
+            Box::new(IbanRecognizer::new()),
+            Box::new(CryptoRecognizer::new()),
+        ];
+        // High-precision secret detectors (AWS, GitHub, Slack, Stripe, JWT, …)
+        // run alongside the PII recognizers — each has a prefix distinctive
+        // enough that false positives are rare.
+        strict.extend(crate::secrets::high_precision_recognizers());
+
         Self {
-            strict: vec![
-                Box::new(EmailRecognizer::new()),
-                Box::new(CreditCardRecognizer::new()),
-                Box::new(PhoneRecognizer::new()),
-                Box::new(UsSsnRecognizer::new()),
-                Box::new(IpV4Recognizer::new()),
-                Box::new(IpV6Recognizer::new()),
-                Box::new(UrlRecognizer::new()),
-                Box::new(MacRecognizer::new()),
-                Box::new(IbanRecognizer::new()),
-                Box::new(CryptoRecognizer::new()),
-            ],
+            strict,
             broad: vec![
                 Box::new(DriverLicenseCandidateRecognizer::new()),
                 Box::new(PassportCandidateRecognizer::new()),
             ],
+            // Low-precision secret detectors (entropy heuristics, keyword
+            // assignment) — opt-in via `[entities] SECRET_… = true`.
+            opt_in: crate::secrets::low_precision_recognizers(),
         }
     }
 
@@ -51,6 +65,10 @@ impl RecognizerSet {
 
     pub fn broad_iter(&self) -> impl Iterator<Item = &dyn Recognizer> {
         self.broad.iter().map(|r| r.as_ref())
+    }
+
+    pub fn opt_in_iter(&self) -> impl Iterator<Item = &dyn Recognizer> {
+        self.opt_in.iter().map(|r| r.as_ref())
     }
 }
 
