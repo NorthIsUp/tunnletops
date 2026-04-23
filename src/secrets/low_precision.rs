@@ -218,12 +218,14 @@ mod tests {
     use super::*;
 
     // ---------- HexHighEntropyRecognizer ----------
+    //
+    // Fixtures lifted from detect-secrets tests/plugins/high_entropy_strings_test.py.
 
     #[test]
-    fn hex_entropy_accepts_random_sha256_hex() {
+    fn hex_entropy_accepts_random_hex() {
         let r = HexHighEntropyRecognizer::new();
-        // Actual SHA-256 hex of "tunneltops".
-        let s = r#"hash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08""#;
+        // detect-secrets positive fixture (32-char random hex, a.k.a. MD5 length).
+        let s = r#"token: "2b00042f7481c7b056c4b410d28f33cf""#;
         assert_eq!(r.analyze("f", s).len(), 1);
     }
 
@@ -234,19 +236,28 @@ mod tests {
         assert!(r.analyze("f", s).is_empty());
     }
 
+    #[test]
+    fn hex_entropy_rejects_short_run() {
+        let r = HexHighEntropyRecognizer::new();
+        // detect-secrets negative: below 32-char minimum.
+        let s = r#"value: "aaaaaa""#;
+        assert!(r.analyze("f", s).is_empty());
+    }
+
     // ---------- Base64HighEntropyRecognizer ----------
 
     #[test]
-    fn base64_entropy_accepts_random_looking_string() {
+    fn base64_entropy_accepts_random_base64() {
         let r = Base64HighEntropyRecognizer::new();
-        let s = r#"token: "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY""#;
+        // detect-secrets positive fixture (60-char base64).
+        let s = r#"token: "c3VwZXIgbG9uZyBzdHJpbmcgc2hvdWxkIGNhdXNlIGVub3VnaCBlbnRyb3B5""#;
         assert_eq!(r.analyze("f", s).len(), 1);
     }
 
     #[test]
-    fn base64_entropy_rejects_identifier() {
+    fn base64_entropy_rejects_low_entropy_identifier() {
         let r = Base64HighEntropyRecognizer::new();
-        // Low-entropy repeated string with only 2 chars.
+        // Repeated 2-char alphabet → entropy 1.0 bits/char, below 4.5 floor.
         let s = r#"id: "abababababababababab""#;
         assert!(r.analyze("f", s).is_empty());
     }
@@ -256,7 +267,7 @@ mod tests {
         // A pure-hex string should not emit via the base64 recognizer — the
         // hex recognizer owns it.
         let r = Base64HighEntropyRecognizer::new();
-        let s = r#"sha: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08""#;
+        let s = r#"sha: "2b00042f7481c7b056c4b410d28f33cf""#;
         assert!(r.analyze("f", s).is_empty());
     }
 
