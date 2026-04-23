@@ -10,7 +10,7 @@
 use regex::Regex;
 
 use super::regex_emit;
-use crate::finding::Finding;
+use crate::finding::{compute_line_starts, resolve_position, Finding};
 use crate::recognizer::Recognizer;
 
 pub fn all() -> Vec<Box<dyn Recognizer>> {
@@ -30,6 +30,7 @@ pub fn all() -> Vec<Box<dyn Recognizer>> {
         Box::new(MailchimpKeyRecognizer::new()),
         Box::new(DiscordBotTokenRecognizer::new()),
         Box::new(PyPiTokenRecognizer::new()),
+        Box::new(KeywordAssignmentRecognizer::new()),
     ]
 }
 
@@ -460,6 +461,125 @@ impl Recognizer for PyPiTokenRecognizer {
     }
 }
 
+// =============================================================================
+// SECRET_KEYWORD_ASSIGNMENT — `password = "..."`, `API_KEY: value`, etc.
+// =============================================================================
+
+pub struct KeywordAssignmentRecognizer {
+    re: Regex,
+}
+
+impl KeywordAssignmentRecognizer {
+    pub fn new() -> Self {
+        // Keyword-in-identifier assignment shapes (modeled on detect-secrets'
+        // KeywordDetector but scoped to what we can do without a full
+        // tokenizer). Shapes that match:
+        //   password = "hunter2"          POSTGRES_PASSWORD: postgres
+        //   api_key: "abc..."             SECRET_KEY="production-key"
+        //   detect-secrets = "latest"     user_password: hunter2
+        //
+        // LHS boundary: `(?:^|[^A-Za-z0-9])` requires start-of-string OR a
+        // non-alphanumeric char immediately before the keyword. That lets
+        // `_PASSWORD` / `-secret` / `. password` through but rejects
+        // identifiers that fuse a digit into the keyword (`1password` —
+        // the 1Password product name — is NOT a password field).
+        //
+        // RHS: quoted (group 1) or unquoted (group 2). Unquoted values stop
+        // at any non-`[A-Za-z0-9_\-]` char. `os.getenv(...)` captures `os`,
+        // but `{4,}` fails at 2 chars so no match. `faker.password()` would
+        // capture `faker`, then the post-filter in `analyze` rejects it
+        // because the next char is `.` (expression continuation).
+        let re = Regex::new(
+            r#"(?i)(?:^|[^A-Za-z0-9])(?:passwd|password|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|bearer)[A-Za-z0-9_\-]*\s*[:=]\s*(?:["']([^"']{4,})["']|([A-Za-z0-9_\-]{4,}))"#,
+        )
+        .unwrap();
+        Self { re }
+    }
+}
+
+impl Recognizer for KeywordAssignmentRecognizer {
+    fn entity_type(&self) -> &'static str {
+        "SECRET_KEYWORD_ASSIGNMENT"
+    }
+    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
+        let line_starts = compute_line_starts(text);
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        for caps in self.re.captures_iter(text) {
+            // Prefer the quoted group; fall back to the unquoted one.
+            let (m, quoted) = if let Some(q) = caps.get(1) {
+                (q, true)
+            } else if let Some(u) = caps.get(2) {
+                (u, false)
+            } else {
+                continue;
+            };
+            let body = m.as_str();
+            if is_placeholder(body) {
+                continue;
+            }
+            // Unquoted values stopped at the first non-charset char. If that
+            // char is `.`, `(`, `[`, or `=`, the RHS is an expression
+            // (method chain, call, subscript, comparison) — skip it.
+            if !quoted {
+                let next = bytes.get(m.end()).copied();
+                if matches!(next, Some(b'.') | Some(b'(') | Some(b'[') | Some(b'=')) {
+                    continue;
+                }
+            }
+            let (line_num, col_start, col_end, line_content) =
+                resolve_position(text, &line_starts, m.start(), m.end());
+            out.push(Finding {
+                file: file.to_string(),
+                line_num,
+                col_start,
+                col_end,
+                entity_type: self.entity_type().to_string(),
+                text: body.to_string(),
+                score: 0.4,
+                line_content,
+            });
+        }
+        out
+    }
+}
+
+/// Return true if the value looks like a placeholder rather than a real secret.
+/// detect-secrets keeps a curated deny-list; we cover the common cases.
+fn is_placeholder(v: &str) -> bool {
+    let lower = v.to_ascii_lowercase();
+    if v.chars().all(|c| c == 'x' || c == 'X')
+        || v.chars().all(|c| c == '*')
+        || v.chars().all(|c| c == '0')
+    {
+        return true;
+    }
+    for needle in [
+        "changeme",
+        "example",
+        "placeholder",
+        "your_",
+        "yourpassword",
+        "password",
+        "dummy",
+        "redacted",
+        "<secret>",
+        "<password>",
+        "todo",
+        "none",
+        "null",
+    ] {
+        if lower.contains(needle) {
+            return true;
+        }
+    }
+    // Template interpolation — `${VAR}`, `{{VAR}}`, `%(x)s`.
+    if v.contains("${") || v.contains("{{") || v.contains("%(") {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     //! Fixtures are lifted from detect-secrets's `tests/plugins/*.py` so this
@@ -770,5 +890,106 @@ mod tests {
         // 80-char minimum on the payload; this one is well below.
         let short = concat!("pypi-", "AgEIcHlwaS5vcmcCJDU3OTM1MjliLW");
         assert!(r.analyze("f", short).is_empty());
+    }
+
+    // ---------- KeywordAssignmentRecognizer ---------------------------------
+
+    #[test]
+    fn keyword_matches_quoted_password() {
+        let r = KeywordAssignmentRecognizer::new();
+        let f = r.analyze("f", r#"password = "hunter2real""#);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].text, "hunter2real");
+    }
+
+    #[test]
+    fn keyword_matches_test_password_literal() {
+        // Regression: this is the `password="test-pass-123"` case the user
+        // flagged as a clear miss. Has to fire by default, not only on opt-in.
+        let r = KeywordAssignmentRecognizer::new();
+        let f = r.analyze("f", r#"password="test-pass-123","#);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].text, "test-pass-123");
+    }
+
+    #[test]
+    fn keyword_matches_unquoted_yaml_value() {
+        // Regression: `POSTGRES_PASSWORD: postgres` from a Docker Compose /
+        // CI workflow. Unquoted YAML value, embedded `_PASSWORD` keyword.
+        let r = KeywordAssignmentRecognizer::new();
+        let f = r.analyze("f", "POSTGRES_PASSWORD: postgres");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].text, "postgres");
+    }
+
+    #[test]
+    fn keyword_matches_env_var_style_secret_key() {
+        let r = KeywordAssignmentRecognizer::new();
+        let f = r.analyze(
+            "f",
+            r#"fly secrets set SECRET_KEY="production-secret-key" --app x"#,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].text, "production-secret-key");
+    }
+
+    #[test]
+    fn keyword_rejects_product_noun_with_digit_prefix() {
+        // `1password` is the 1Password product name, not a password field.
+        // The `(?:^|[^A-Za-z0-9])` LHS boundary excludes digit-fused keywords.
+        let r = KeywordAssignmentRecognizer::new();
+        assert!(r.analyze("f", r#"1password = "latest""#).is_empty());
+    }
+
+    #[test]
+    fn keyword_rejects_method_call_rhs() {
+        // `faker_instance.password()` — unquoted match captures
+        // `faker_instance`, then the post-filter drops it because next is `.`.
+        let r = KeywordAssignmentRecognizer::new();
+        assert!(r
+            .analyze("f", "password=faker_instance.password(),")
+            .is_empty());
+    }
+
+    #[test]
+    fn keyword_rejects_os_getenv_rhs() {
+        // Python dict value: `'PASSWORD': os.getenv('PGPASSWORD', 'postgres')`.
+        // `os` is only 2 chars — below the `{4,}` minimum; no match overall.
+        let r = KeywordAssignmentRecognizer::new();
+        assert!(r
+            .analyze(
+                "f",
+                r#"'PASSWORD': os.getenv('PGPASSWORD', 'postgres'),"#
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn keyword_rejects_placeholders_and_interpolations() {
+        let r = KeywordAssignmentRecognizer::new();
+        assert!(r.analyze("f", r#"password = "changeme""#).is_empty());
+        assert!(r.analyze("f", r#"api_key = "xxxxxxxx""#).is_empty());
+        assert!(r.analyze("f", r#"secret = "${VAULT_KEY}""#).is_empty());
+        assert!(r.analyze("f", r#"password = "YOUR_PASSWORD""#).is_empty());
+    }
+
+    #[test]
+    fn keyword_is_case_insensitive() {
+        let r = KeywordAssignmentRecognizer::new();
+        assert_eq!(r.analyze("f", r#"API_KEY: "Hk7d2ZpQ""#).len(), 1);
+        assert_eq!(r.analyze("f", r#"Bearer: "abcXYZ123""#).len(), 1);
+    }
+
+    #[test]
+    fn is_placeholder_detects_common_cases() {
+        assert!(is_placeholder("xxxx"));
+        assert!(is_placeholder("XXXXXX"));
+        assert!(is_placeholder("CHANGEME123"));
+        assert!(is_placeholder("example-password"));
+        assert!(is_placeholder("${SECRET}"));
+        assert!(is_placeholder("{{KEY}}"));
+        assert!(!is_placeholder("real-random-value-1234"));
+        assert!(!is_placeholder("test-pass-123"));
+        assert!(!is_placeholder("postgres"));
     }
 }

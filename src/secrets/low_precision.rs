@@ -1,4 +1,4 @@
-//! Low-precision secret recognizers — entropy + keyword heuristics.
+//! Low-precision secret recognizers — entropy heuristics.
 //!
 //! These detectors flame false positives on any codebase with binary blobs,
 //! hashes, UUIDs, or test fixtures. They're useful but noisy, so they're
@@ -8,15 +8,15 @@
 //! [entities]
 //! SECRET_HEX_HIGH_ENTROPY    = true
 //! SECRET_BASE64_HIGH_ENTROPY = true
-//! SECRET_KEYWORD_ASSIGNMENT  = true
 //! ```
 //!
 //! Patterns derived from detect-secrets `plugins/high_entropy_strings.py`
-//! and `plugins/keyword.py` (Apache 2.0).
+//! (Apache 2.0). The keyword-assignment detector lives in `high_precision`
+//! since its false-positive rate is low enough to run by default.
 
 use regex::Regex;
 
-use super::{regex_emit_group, shannon_entropy};
+use super::shannon_entropy;
 use crate::finding::{compute_line_starts, resolve_position, Finding};
 use crate::recognizer::Recognizer;
 
@@ -24,7 +24,6 @@ pub fn all() -> Vec<Box<dyn Recognizer>> {
     vec![
         Box::new(HexHighEntropyRecognizer::new()),
         Box::new(Base64HighEntropyRecognizer::new()),
-        Box::new(KeywordAssignmentRecognizer::new()),
     ]
 }
 
@@ -140,79 +139,6 @@ impl Recognizer for Base64HighEntropyRecognizer {
     }
 }
 
-// =============================================================================
-// SECRET_KEYWORD_ASSIGNMENT — `password = "..."`, `api_key: "..."` shapes
-// =============================================================================
-
-pub struct KeywordAssignmentRecognizer {
-    re: Regex,
-}
-
-impl KeywordAssignmentRecognizer {
-    pub fn new() -> Self {
-        // detect-secrets KeywordDetector. Match `<keyword> = "<value>"` where
-        // keyword is password/secret/api_key/access_token/…. Captures the
-        // *value* (group 2) as the finding text.
-        //
-        // Value rules: 4+ chars, not a pure placeholder. We filter placeholders
-        // in analyze(), since they're easier to enumerate than to regex-away.
-        let re = Regex::new(
-            r#"(?i)\b(?:passwd|password|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|bearer)\s*[:=]\s*["']([^"'\s]{4,})["']"#,
-        )
-        .unwrap();
-        Self { re }
-    }
-}
-
-impl Recognizer for KeywordAssignmentRecognizer {
-    fn entity_type(&self) -> &'static str {
-        "SECRET_KEYWORD_ASSIGNMENT"
-    }
-    fn analyze(&self, file: &str, text: &str) -> Vec<Finding> {
-        let raw = regex_emit_group(file, text, &self.re, 1, self.entity_type(), 0.4);
-        raw.into_iter()
-            .filter(|f| !is_placeholder(&f.text))
-            .collect()
-    }
-}
-
-/// Return true if the value looks like a placeholder (no real secret).
-/// detect-secrets keeps a curated deny-list; we check the common cases.
-fn is_placeholder(v: &str) -> bool {
-    let lower = v.to_ascii_lowercase();
-    // Common placeholder shapes.
-    if v.chars().all(|c| c == 'x' || c == 'X')
-        || v.chars().all(|c| c == '*')
-        || v.chars().all(|c| c == '0')
-    {
-        return true;
-    }
-    for needle in [
-        "changeme",
-        "example",
-        "placeholder",
-        "your_",
-        "yourpassword",
-        "password",
-        "dummy",
-        "redacted",
-        "<secret>",
-        "<password>",
-        "todo",
-        "none",
-        "null",
-    ] {
-        if lower.contains(needle) {
-            return true;
-        }
-    }
-    // Template interpolation tokens — `${env.SECRET}`, `{{VAR}}`, `%(x)s`.
-    if v.contains("${") || v.contains("{{") || v.contains("%(") {
-        return true;
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,43 +197,4 @@ mod tests {
         assert!(r.analyze("f", s).is_empty());
     }
 
-    // ---------- KeywordAssignmentRecognizer ----------
-
-    #[test]
-    fn keyword_assignment_matches_password_literal() {
-        let r = KeywordAssignmentRecognizer::new();
-        let s = r#"password = "hunter2real""#;
-        let f = r.analyze("f", s);
-        assert_eq!(f.len(), 1);
-        assert_eq!(f[0].text, "hunter2real");
-    }
-
-    #[test]
-    fn keyword_assignment_rejects_placeholders() {
-        let r = KeywordAssignmentRecognizer::new();
-        assert!(r.analyze("f", r#"password = "changeme""#).is_empty());
-        assert!(r.analyze("f", r#"api_key = "xxxxxxxx""#).is_empty());
-        assert!(r.analyze("f", r#"secret = "${VAULT_KEY}""#).is_empty());
-        assert!(r.analyze("f", r#"password = "YOUR_PASSWORD""#).is_empty());
-    }
-
-    #[test]
-    fn keyword_assignment_is_case_insensitive() {
-        let r = KeywordAssignmentRecognizer::new();
-        assert_eq!(r.analyze("f", r#"API_KEY: "Hk7d2ZpQ""#).len(), 1);
-        assert_eq!(r.analyze("f", r#"Bearer: "abcXYZ123""#).len(), 1);
-    }
-
-    // ---------- is_placeholder ----------
-
-    #[test]
-    fn placeholder_detects_common_cases() {
-        assert!(is_placeholder("xxxx"));
-        assert!(is_placeholder("XXXXXX"));
-        assert!(is_placeholder("CHANGEME123"));
-        assert!(is_placeholder("example-password"));
-        assert!(is_placeholder("${SECRET}"));
-        assert!(is_placeholder("{{KEY}}"));
-        assert!(!is_placeholder("real-random-value-1234"));
-    }
 }
