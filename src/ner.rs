@@ -653,7 +653,9 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
         return Ok(());
     }
     eprintln!("tunneltops: downloading {label} from {url}");
-    let mut resp = ureq::get(url)
+    let agent = build_http_agent();
+    let mut resp = agent
+        .get(url)
         .call()
         .with_context(|| format!("downloading {label}"))?
         .into_reader();
@@ -666,4 +668,38 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
     fs::write(path, &buf).with_context(|| format!("writing {}", path.display()))?;
     eprintln!("tunneltops: cached {label} at {}", path.display());
     Ok(())
+}
+
+/// Build a `ureq::Agent` that honors `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
+/// environment variables (both upper- and lowercase). ureq v2 does NOT read
+/// these automatically — a bare `ureq::get` goes straight to the target host,
+/// bypassing any configured corporate proxy.
+///
+/// Precedence mirrors curl's: HTTPS_PROXY > HTTP_PROXY > ALL_PROXY, lowercase
+/// variant as the fallback for each. First one that parses as a proxy URL wins.
+///
+/// Note: if the proxy does TLS interception with a custom CA, that's a
+/// separate concern handled at the system cert store level — this just
+/// makes us route through the proxy in the first place.
+fn build_http_agent() -> ureq::Agent {
+    let proxy_url = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok();
+    let mut builder = ureq::AgentBuilder::new();
+    if let Some(url) = proxy_url {
+        match ureq::Proxy::new(&url) {
+            Ok(proxy) => {
+                eprintln!("tunneltops: using HTTP proxy from env ({url})");
+                builder = builder.proxy(proxy);
+            }
+            Err(e) => {
+                eprintln!("tunneltops: ignoring malformed proxy env ({url}): {e}");
+            }
+        }
+    }
+    builder.build()
 }
