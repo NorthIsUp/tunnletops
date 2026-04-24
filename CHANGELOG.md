@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.31] - 2026-04-24
+
+### Fixed
+
+- Model-download client now honors `HTTPS_PROXY` / `HTTP_PROXY` /
+  `ALL_PROXY` environment variables (upper- and lowercase), with
+  curl's precedence order. Bare `ureq::get` calls were bypassing
+  any configured corporate proxy, which surfaced as TLS failures
+  in sandboxed environments. Logs the proxy URL that was picked
+  up so misconfigurations are visible. If the proxy does TLS
+  interception with a private CA, that CA still needs to be in
+  the system trust store — this patch only fixes routing.
+
+## [0.5.30] - 2026-04-24
+
+### Changed
+
+- `SECRET_KEYWORD_ASSIGNMENT` promoted from opt-in (low-precision
+  tier) to default-on (high-precision tier). Pattern tightened to
+  reduce false positives:
+  - LHS boundary is `(?:^|[^A-Za-z0-9])` rather than `\b`, which
+    lets `POSTGRES_PASSWORD`, `SECRET_KEY`, `user_password`, and
+    `detect-secrets` match the embedded keyword while rejecting
+    digit-fused identifiers like `1password` (1Password the
+    product noun, not a password field).
+  - RHS supports unquoted YAML / dotenv values
+    (`POSTGRES_PASSWORD: postgres`) alongside quoted literals.
+  - Post-filter on unquoted matches: drops RHSes followed by
+    `.`, `(`, `[`, `=` so `os.getenv(...)`, `faker.password()`,
+    `arr[0]`, `==` etc. don't emit findings.
+
+## [0.5.29] - 2026-04-24
+
+### Added
+
+- Secret scanners ported from Yelp's detect-secrets (Apache 2.0,
+  compatible with MIT). Two tiers:
+  - **High-precision (on by default):** 15 prefix/structure-anchored
+    token detectors — AWS, GitHub, Slack, Stripe, Google API, JWT,
+    PEM private key, NPM, Twilio, SendGrid, Square OAuth, Mailgun,
+    Mailchimp, Discord bot, PyPI.
+  - **Low-precision (opt-in per entity type):** Shannon-entropy
+    hex + base64 string detectors. Gated behind explicit
+    `[entities] SECRET_HEX_HIGH_ENTROPY = true` /
+    `SECRET_BASE64_HIGH_ENTROPY = true` since entropy detection
+    flames false positives on hashes, UUIDs, and binary blobs.
+- New `opt_in` tier on `RecognizerSet`; `Ignorelist::is_entity_explicitly_enabled`
+  gates the tier (only `true` or a threshold float enables).
+
+### Changed
+
+- `AwsAccessKeyRecognizer` prefix alternation expanded to match
+  detect-secrets' corpus: AKIA / ASIA / AIDA / AROA / AGPA / AIPA
+  / ACCA / ABIA / A3T0 / ANPA / ANVA.
+
 ## [0.5.28] - 2026-04-17
 
 ### Added
