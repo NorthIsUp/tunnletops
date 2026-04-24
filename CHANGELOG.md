@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.32] - 2026-04-24
+
+### Fixed
+
+- Model-download TLS config now honors `SSL_CERT_FILE` / `SSL_CERT_DIR`.
+  ureq's rustls backend only trusts the bundled Mozilla root CAs by
+  default — corporate TLS-inspecting proxies with a private CA were
+  failing the handshake even with the proxy correctly routed via
+  `HTTPS_PROXY` (v0.5.31). We now start with the `webpki-roots` bundle
+  (rustls' normal default) and append every cert from `SSL_CERT_FILE`
+  (PEM bundle) and `SSL_CERT_DIR` (directory of PEM files) to the
+  trust store. Load failures log but are non-fatal — we fall back to
+  the default bundle rather than aborting the scan.
+
 ## [0.5.31] - 2026-04-24
 
 ### Fixed

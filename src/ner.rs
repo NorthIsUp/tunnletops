@@ -670,17 +670,21 @@ fn ensure_file(path: &Path, url: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build a `ureq::Agent` that honors `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`
-/// environment variables (both upper- and lowercase). ureq v2 does NOT read
-/// these automatically — a bare `ureq::get` goes straight to the target host,
-/// bypassing any configured corporate proxy.
+/// Build a `ureq::Agent` that honors standard proxy / TLS env vars.
 ///
-/// Precedence mirrors curl's: HTTPS_PROXY > HTTP_PROXY > ALL_PROXY, lowercase
-/// variant as the fallback for each. First one that parses as a proxy URL wins.
+/// Proxy (curl precedence, upper- or lowercase):
+///   HTTPS_PROXY > HTTP_PROXY > ALL_PROXY
+/// ureq v2 does NOT read these automatically; a bare `ureq::get` call bypasses
+/// any configured corporate proxy.
 ///
-/// Note: if the proxy does TLS interception with a custom CA, that's a
-/// separate concern handled at the system cert store level — this just
-/// makes us route through the proxy in the first place.
+/// Custom trust store:
+///   SSL_CERT_FILE — path to a PEM bundle of additional root CAs
+///   SSL_CERT_DIR  — directory of PEM files (all are loaded)
+/// rustls (ureq's default TLS backend) only trusts the bundled Mozilla roots
+/// by default and ignores `SSL_CERT_FILE` entirely, so TLS-inspecting
+/// corporate proxies with a private CA fail the handshake. We read those
+/// env vars, parse the PEMs, and append their certs to the rustls root store
+/// alongside `webpki-roots`.
 fn build_http_agent() -> ureq::Agent {
     let proxy_url = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
@@ -689,7 +693,7 @@ fn build_http_agent() -> ureq::Agent {
         .or_else(|_| std::env::var("ALL_PROXY"))
         .or_else(|_| std::env::var("all_proxy"))
         .ok();
-    let mut builder = ureq::AgentBuilder::new();
+    let mut builder = ureq::AgentBuilder::new().tls_config(std::sync::Arc::new(build_tls_config()));
     if let Some(url) = proxy_url {
         match ureq::Proxy::new(&url) {
             Ok(proxy) => {
@@ -702,4 +706,66 @@ fn build_http_agent() -> ureq::Agent {
         }
     }
     builder.build()
+}
+
+/// Build the rustls client config we hand to ureq. Starts with the bundled
+/// Mozilla CA set from `webpki-roots`, then appends any certs from
+/// `SSL_CERT_FILE` / `SSL_CERT_DIR`. Load failures are logged but non-fatal —
+/// we still get the default trust store, which is better than aborting the scan.
+fn build_tls_config() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    // Seed with the Mozilla bundle ureq normally uses.
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // SSL_CERT_FILE: single PEM bundle, same semantics as OpenSSL.
+    if let Ok(path) = std::env::var("SSL_CERT_FILE") {
+        match load_pem_certs_into(Path::new(&path), &mut roots) {
+            Ok(0) => {
+                eprintln!("tunneltops: SSL_CERT_FILE ({path}) contained no certificates");
+            }
+            Ok(count) => {
+                eprintln!("tunneltops: loaded {count} cert(s) from SSL_CERT_FILE ({path})");
+            }
+            Err(e) => {
+                eprintln!("tunneltops: failed to read SSL_CERT_FILE ({path}): {e}");
+            }
+        }
+    }
+
+    // SSL_CERT_DIR: directory of PEM files (OpenSSL scans every entry).
+    if let Ok(dir) = std::env::var("SSL_CERT_DIR") {
+        let mut total = 0usize;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    total += load_pem_certs_into(&p, &mut roots).unwrap_or(0);
+                }
+            }
+        }
+        if total > 0 {
+            eprintln!("tunneltops: loaded {total} cert(s) from SSL_CERT_DIR ({dir})");
+        }
+    }
+
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
+/// Parse a PEM file and add every CERTIFICATE block to `roots`. Returns the
+/// count added. Skips non-certificate PEM blocks (keys, etc.) silently —
+/// SSL_CERT_FILE/DIR bundles sometimes include private keys for the host
+/// identity that aren't relevant for root-trust purposes.
+fn load_pem_certs_into(path: &Path, roots: &mut rustls::RootCertStore) -> Result<usize> {
+    let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(&data[..]);
+    let mut added = 0usize;
+    for item in rustls_pemfile::certs(&mut reader) {
+        let cert = item.with_context(|| format!("parsing PEM in {}", path.display()))?;
+        if roots.add(cert).is_ok() {
+            added += 1;
+        }
+    }
+    Ok(added)
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tunneltops"
-version = "0.5.31"
+version = "0.5.32"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast PHI/PII scanner for source repositories"
@@ -28,6 +28,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "5"
 ureq = { version = "2", features = ["tls"] }
+# TLS config: we extend rustls' root store with any certs from SSL_CERT_FILE /
+# SSL_CERT_DIR so corporate TLS-inspecting proxies work. Versions are pinned
+# to ureq 2.12's transitive choice so we don't double-compile rustls.
+rustls = "0.23"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 sha2 = "0.10"
 hex = "0.4"
 glob = "0.3"
