@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.33] - 2026-04-24
+
+### Changed
+
+- Release workflow is now code-driven. Pushing to `main` with a new
+  `version` in `Cargo.toml` automatically tags the commit, builds
+  cross-platform binaries, and publishes a GitHub release — no
+  manual `git push origin <tag>` step. A `check-version` job reads
+  the version and skips the build/release jobs if the corresponding
+  `v<version>` tag already exists on origin, so doc-only and
+  CI-only pushes to `main` are free. The tag is created by
+  `softprops/action-gh-release` at the release commit itself, which
+  eliminates the "tag points at the wrong commit" failure mode
+  that happened with hand-managed tag pushes.
+
 ## [0.5.32] - 2026-04-24
 
 ### Fixed

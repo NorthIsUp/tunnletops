@@ -1,14 +1,46 @@
 name: Release
 
+# Code-driven releases: a push to `main` that bumps the Cargo.toml version
+# (so the corresponding `v<version>` tag doesn't exist on origin yet)
+# automatically tags the commit, builds release binaries, and publishes
+# a GitHub release. No manual `git push origin <tag>` step.
+#
+# The `check-version` job gates everything: if the tag for the current
+# Cargo.toml version already exists, build and release jobs are skipped.
+# That makes doc-only / CI-only pushes to main free.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Read Cargo.toml version and check for existing tag
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "Tag v$version already exists on origin — skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag v$version does not exist on origin — will release."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
     strategy:
       matrix:
         include:
@@ -65,7 +97,8 @@ jobs:
           path: ${{ matrix.artifact }}
 
   release:
-    needs: build
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,8 +116,8 @@ jobs:
       - name: Extract changelog section
         id: changelog
         run: |
-          version="${GITHUB_REF#refs/tags/v}"
-          # Extract the [version] section from CHANGELOG.md (stops at next ## heading).
+          version="${{ needs.check-version.outputs.version }}"
+          # Pull the [version] section from CHANGELOG.md, stopping at the next `## [` heading.
           notes=$(awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { flag=1; next }
             flag && /^## \[/ { exit }
@@ -92,19 +125,25 @@ jobs:
           ' CHANGELOG.md)
           if [ -z "$notes" ]; then
             echo "No changelog entry found for v${version}; using auto-generated notes only."
-            echo "has_notes=false" >> $GITHUB_OUTPUT
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
           else
             {
               echo 'notes<<CHANGELOG_EOF'
               echo "$notes"
               echo 'CHANGELOG_EOF'
-            } >> $GITHUB_OUTPUT
-            echo "has_notes=true" >> $GITHUB_OUTPUT
+            } >> "$GITHUB_OUTPUT"
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create release
+      # `softprops/action-gh-release` creates the git tag at the checked-out
+      # commit if it doesn't already exist, so no separate `git tag && git push`
+      # step is needed. The tag is always on the release commit itself, which
+      # avoids the "tag points at wrong commit" class of bug entirely.
+      - name: Create release (creates the tag)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: v${{ needs.check-version.outputs.version }}
           body: ${{ steps.changelog.outputs.has_notes == 'true' && steps.changelog.outputs.notes || '' }}
           generate_release_notes: true
           files: |
