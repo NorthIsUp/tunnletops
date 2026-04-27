@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.34] - 2026-04-24
+
+### Fixed
+
+- TLS handshakes panicked at runtime with `Could not automatically
+  determine the process-level CryptoProvider` after v0.5.32 added
+  `rustls = "0.23"` as a direct dep. rustls 0.23 stopped selecting
+  a crypto provider implicitly even when the `ring` feature is on;
+  every consumer has to either pick the feature or call
+  `install_default()` explicitly. Both are now in place — `ring`
+  feature on the rustls dep + `rustls::crypto::ring::default_provider().install_default()`
+  at the top of `build_tls_config` — so the SSL_CERT_FILE /
+  SSL_CERT_DIR support added in v0.5.32 actually completes a
+  handshake instead of crashing.
+
 ## [0.5.33] - 2026-04-24
 
 ### Changed

@@ -1,6 +1,6 @@
 [package]
 name = "tunneltops"
-version = "0.5.33"
+version = "0.5.34"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast PHI/PII scanner for source repositories"
@@ -31,7 +31,12 @@ ureq = { version = "2", features = ["tls"] }
 # TLS config: we extend rustls' root store with any certs from SSL_CERT_FILE /
 # SSL_CERT_DIR so corporate TLS-inspecting proxies work. Versions are pinned
 # to ureq 2.12's transitive choice so we don't double-compile rustls.
-rustls = "0.23"
+#
+# `ring` feature: rustls 0.23+ won't pick a CryptoProvider implicitly anymore
+# — without it the binary panics on first TLS connection
+# (`Could not automatically determine the process-level CryptoProvider`).
+# `ring` is already a transitive dep so this only flips a feature.
+rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 sha2 = "0.10"

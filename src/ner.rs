@@ -713,6 +713,14 @@ fn build_http_agent() -> ureq::Agent {
 /// `SSL_CERT_FILE` / `SSL_CERT_DIR`. Load failures are logged but non-fatal —
 /// we still get the default trust store, which is better than aborting the scan.
 fn build_tls_config() -> rustls::ClientConfig {
+    // rustls 0.23 stopped picking a CryptoProvider implicitly even with the
+    // `ring` feature flipped on — every binary using rustls has to install
+    // one before its first TLS handshake or the connection panics with
+    // "Could not automatically determine the process-level CryptoProvider".
+    // `install_default` returns Err if one's already installed; we don't
+    // care which call wins, only that *some* provider is in place.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut roots = rustls::RootCertStore::empty();
     // Seed with the Mozilla bundle ureq normally uses.
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
